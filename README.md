@@ -1,0 +1,2 @@
+# hugo
+ymh blog

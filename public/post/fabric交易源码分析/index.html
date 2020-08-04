@@ -1,0 +1,420 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+<title>Fabric交易源码分析</title>
+
+
+  
+  
+  <script async src="https://www.googletagmanager.com/gtag/js?id=UA-XXXXXXXX-XX"></script>
+  <script>
+    window.dataLayer = window.dataLayer || [];
+    function gtag(){dataLayer.push(arguments);}
+    gtag('js', new Date());
+    gtag('config', 'UA-XXXXXXXX-XX');
+  </script>
+  
+
+
+<meta http-equiv="X-UA-Compatible" content="IE=edge" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<link rel="alternate" type="application/rss+xml" href="https://yinminghao.top/index.xml" title="Hugo Themes">
+
+<link id="dark-mode-theme" rel="stylesheet" href="https://yinminghao.top/css/dark.css" />
+<link rel="stylesheet" href="https://yinminghao.top/fontawesome/css/all.min.css" />
+
+<script src="https://yinminghao.top/js/bundle.js"></script>
+<script src="https://yinminghao.top/js/instantpage.js" type="module" defer></script>
+<meta name="generator" content="Hugo 0.74.3" />
+  </head>
+  <body>
+    
+  
+
+
+
+
+  <header>
+    <nav class="navbar">
+  <div class="nav">
+    
+      <a href="https://yinminghao.top/" class="nav-logo">
+      <img src="https://yinminghao.top/images/icon.png"
+           width="50"
+           height="50"
+           alt="Logo">
+      </a>
+    
+
+    <ul class="nav-links">
+      
+        
+          <li><a href="/about/" name="About"><i class="fas fa-user fa-lg"></i></a></li>
+        
+      
+        
+          <li><a href="/tags" name="Tags"><i class="fas fa-tag fa-lg"></i></a></li>
+        
+      
+        
+          <li><a href="/categories" name="Category"><i class="fas fa-folder-open fa-lg"></i></a></li>
+        
+      
+        
+          <li><a href="/search" name="Search"><i class="fas fa-search fa-lg"></i></a></li>
+        
+      
+        
+          <li><a href="/archives" name="Archives"><i class="fas fa-archive fa-lg"></i></a></li>
+        
+      
+    </ul>
+  </div>
+</nav>
+
+    <div class="intro-header">
+      <div class="container">
+        <div class="post-heading">
+          
+            <h1>Fabric交易源码分析</h1>
+          
+          
+            <span class="meta-post">
+  <i class="fa fa-calendar-alt"></i>&nbsp;Aug 3, 2020
+  
+</span>
+
+          
+        </div>
+      </div>
+    </div>
+  </header>
+
+
+    
+  <div class="container" role="main">
+    <article class="article" class="blog-post">
+      
+    <p><strong>本系列为对 fabric <a href="https://github.com/hyperledger/fabric/tree/release-2.1">release-2.1</a> 版本代码阅读的记录，如有不当之处，烦请指正</strong></p>
+<blockquote>
+<p>本文对在一个正常运行fabric网络下交易的追踪，了解 fabric 的内部处理方式，文章主要针对交易流程中关键的步骤进行说明，具体的实现方式和代码细节不在本文讨论范围，感兴趣的读者可以自行阅读相关代码。为了避免出现冗长的代码段，一些判断、错误处理的代码将被省略。</p>
+</blockquote>
+<h2 id="背景知识">背景知识</h2>
+<p>本文假定读者对 fabric 机制有一定了解，如果和笔者一样是之前没有接触过 fabric, 可以从<a href="https://stone-fabric.readthedocs.io/en/latest/whatis.html">官方文档</a>入手，也可以查看笔者的另一篇对 fabric 介绍的文章。</p>
+<p>对交易流程的介绍可以查阅<a href="https://stone-fabric.readthedocs.io/en/latest/txflow.html">文档Transaction Flow</a>。在运行之前，我们假定：    <!-- raw HTML omitted --> 1. 网络中存在正常运行的 chan (利用通道可以同时参与多个、彼此独立的区块链网络)。
+2. 网络中的节点、用户均使用组织CA完成注册、登记并获得确认身份的加密证明。
+3. chaincode(链码,定义交易的执行逻辑：定价规则，背书策略等)已经在 Peer 节点上安装并在通道上完成了实例化。</p>
+<p>除正常的交易之外，本文也包含私有数据的处理逻辑，关于私有数据介绍可查阅<a href="#pdc">附录</a>, 当在链码中引用私有数据集合时，为了保护私有数据在提案、背书和提交交易过程中的机密性，私有数据的交易流程略有不同。
+<!-- raw HTML omitted --><!-- raw HTML omitted --></p>
+<h2 id="交易流程">交易流程</h2>
+<p>我们从源码中的  <a href="https://github.com/hyperledger/fabric/blob/c2e8534b4cc37c17b05eb8d0c57a9fed14db5037/internal/peer/chaincode/invoke.go#L46">chaincodeInvoke 函数(internal/peer/chaincode/invoke.go#L46)</a> 这一客户端调用开始，分析 fabric 网络中三种角色(<strong>客户端、背书节点、排序节点</strong>)在交易(提案)生命周期中的行为与处理逻辑。</p>
+<h3 id="一-客户端">一、 客户端</h3>
+<p>客户端构造<strong>交易提案</strong>并将其发送到 Endorser (背书)节点，交易提案中包含本次交易要调用的合约标识、合约方法和参数信息以及客户端签名等。获取到 Endorser (背书)节点背书后组装成新的消息 <strong>Envelope</strong> 发送到 order (排序)节点</p>
+<p>当客户端提案调用一个链码函数来读取或写入<strong>私有数据</strong>时，会将私有数据(或用于在链码中生成私有数据的数据)放在提案的 transient 字段中发送给被授权的背书节点。</p>
+<div class="highlight"><pre style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4"><code class="language-go" data-lang="go"><span style="color:#66d9ef">func</span> <span style="color:#a6e22e">chaincodeInvoke</span>(<span style="color:#f92672">...</span>) {
+    <span style="color:#75715e">// 构造 ChaincodeCmdFactory, 包含背书节点 client API, 
+</span><span style="color:#75715e"></span>    <span style="color:#75715e">// 签名器、客户端的 TLS 证书，代理节点等
+</span><span style="color:#75715e"></span>    <span style="color:#a6e22e">cf</span>, <span style="color:#a6e22e">err</span> = <span style="color:#a6e22e">InitCmdFactory</span>(<span style="color:#a6e22e">cmd</span>.<span style="color:#a6e22e">Name</span>(), <span style="color:#66d9ef">true</span>, <span style="color:#66d9ef">true</span>, <span style="color:#a6e22e">cryptoProvider</span>)
+     
+    <span style="color:#75715e">// chaincodeInvokeOrQuery 调用 chaincode 并获取返回值
+</span><span style="color:#75715e"></span>    <span style="color:#66d9ef">return</span> <span style="color:#a6e22e">chaincodeInvokeOrQuery</span>(<span style="color:#a6e22e">cmd</span>, <span style="color:#66d9ef">true</span>, <span style="color:#a6e22e">cf</span>)
+} 
+
+<span style="color:#66d9ef">func</span> <span style="color:#a6e22e">ChaincodeInvokeOrQuery</span>(<span style="color:#f92672">...</span>) (<span style="color:#f92672">*</span><span style="color:#a6e22e">pb</span>.<span style="color:#a6e22e">ProposalResponse</span>, <span style="color:#66d9ef">error</span>) {
+    <span style="color:#75715e">// 构建提案(Proposal:可以描述交易), 输入参数包括调用的合约标识、合约方法和参数信息等
+</span><span style="color:#75715e"></span>    <span style="color:#75715e">// tMap: 私有数据，或用于在链码中生成私有数据的数据。
+</span><span style="color:#75715e"></span>    <span style="color:#a6e22e">prop</span>, <span style="color:#a6e22e">txid</span>, <span style="color:#a6e22e">err</span> <span style="color:#f92672">:=</span> <span style="color:#a6e22e">protoutil</span>.<span style="color:#a6e22e">CreateChaincodeProposalWithTxIDAndTransient</span>(<span style="color:#f92672">...</span>, <span style="color:#a6e22e">tMap</span>)
+    
+    <span style="color:#75715e">// 签名提案/交易
+</span><span style="color:#75715e"></span>    <span style="color:#a6e22e">signedProp</span>, <span style="color:#a6e22e">err</span> <span style="color:#f92672">:=</span> <span style="color:#a6e22e">protoutil</span>.<span style="color:#a6e22e">GetSignedProposal</span>(<span style="color:#a6e22e">prop</span>, <span style="color:#a6e22e">signer</span>)
+
+    <span style="color:#75715e">// 发送签名后的提案到背书节点并获取返回各个背书节点对该提案的响应
+</span><span style="color:#75715e"></span>    <span style="color:#a6e22e">responses</span>, <span style="color:#a6e22e">err</span> <span style="color:#f92672">:=</span> <span style="color:#a6e22e">processProposals</span>(<span style="color:#a6e22e">endorserClients</span>, <span style="color:#a6e22e">signedProp</span>)
+    
+    <span style="color:#75715e">// 获取背书后组装成 Envelope message, 包括合法性校验
+</span><span style="color:#75715e"></span>    <span style="color:#a6e22e">env</span>, <span style="color:#a6e22e">err</span> <span style="color:#f92672">:=</span> <span style="color:#a6e22e">protoutil</span>.<span style="color:#a6e22e">CreateSignedTx</span>(<span style="color:#a6e22e">prop</span>, <span style="color:#a6e22e">signer</span>, <span style="color:#a6e22e">responses</span><span style="color:#f92672">...</span>)
+    
+    <span style="color:#75715e">// 发送 Envelope message 到排序节点
+</span><span style="color:#75715e"></span>    <span style="color:#a6e22e">bc</span>.<span style="color:#a6e22e">Send</span>(<span style="color:#a6e22e">env</span>)
+}
+</code></pre></div><!-- raw HTML omitted -->
+<p><strong>关键数据结构</strong></p>
+<div class="highlight"><pre style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4"><code class="language-go" data-lang="go"><span style="color:#75715e">// 发送到背书节点的 Proposal
+</span><span style="color:#75715e"></span><span style="color:#66d9ef">type</span> <span style="color:#a6e22e">Proposal</span> <span style="color:#66d9ef">struct</span> {
+    <span style="color:#a6e22e">Header</span>:
+        <span style="color:#a6e22e">ChannelHeader</span>: <span style="color:#75715e">// 包括txid、时间戳, chanId等信息
+</span><span style="color:#75715e"></span>        <span style="color:#a6e22e">SignatureHeader</span>: <span style="color:#75715e">// 签名
+</span><span style="color:#75715e"></span>    <span style="color:#a6e22e">Payload</span>: <span style="color:#75715e">// 执行 chaincode 的输入
+</span><span style="color:#75715e"></span>}
+
+<span style="color:#75715e">// 发送到排序节点的 Envelope message
+</span><span style="color:#75715e"></span><span style="color:#66d9ef">type</span> <span style="color:#a6e22e">Envelope</span> <span style="color:#66d9ef">struct</span> {
+    <span style="color:#a6e22e">SignatureHeader</span>: <span style="color:#75715e">// 签名
+</span><span style="color:#75715e"></span>    <span style="color:#a6e22e">Header</span>: <span style="color:#a6e22e">Proposal</span>.<span style="color:#a6e22e">Header</span>
+    <span style="color:#a6e22e">Data</span>: []<span style="color:#f92672">*</span><span style="color:#a6e22e">TransactionAction</span>
+}
+
+<span style="color:#66d9ef">type</span> <span style="color:#a6e22e">Transaction</span> <span style="color:#66d9ef">struct</span> {
+    <span style="color:#a6e22e">Header</span>: <span style="color:#a6e22e">Proposal</span>.<span style="color:#a6e22e">Header</span>
+    <span style="color:#a6e22e">Payload</span>:
+        <span style="color:#a6e22e">ChaincodeProposalPayload</span>: <span style="color:#75715e">// 执行 chaincode 的输入: 请求智能合约的函数名、参数等
+</span><span style="color:#75715e"></span>        <span style="color:#a6e22e">Action</span>: 
+            <span style="color:#a6e22e">ProposalResponsePayload</span>: <span style="color:#75715e">// 链码模拟执行结果,对KV类型状态数据库的读写集
+</span><span style="color:#75715e"></span>            <span style="color:#a6e22e">Endorsements</span>: <span style="color:#75715e">// 提案的背书，基本上是背书节点在payload的签名
+</span><span style="color:#75715e"></span>}
+</code></pre></div><!-- raw HTML omitted -->
+<h3 id="二-背书节点">二、 背书节点</h3>
+<p>背书节点收到客户端交易提案后，会模拟执行交易，然后将原始交易提案和执行结果打包到一起，进行签名并发回给客户端，其中在模拟执行交易期间产生的数据修改不会写到账本上。</p>
+<p>背书节点处理<strong>私有数据</strong>时，会将其存储在 transient data store （节点的本地临时存储库）中。然后根据组织集合的策略将私有数据通过 gossip 分发给授权的节点。背书节点将提案响应(背书的读写集)发送给客户端，包含了公共数据，还包含任何私有数据键和值的哈希。<strong>私有数据不会被发送回客户端</strong>。</p>
+<div class="highlight"><pre style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4"><code class="language-go" data-lang="go"><span style="color:#75715e">// ProcessProposal process the Proposal
+</span><span style="color:#75715e"></span><span style="color:#66d9ef">func</span> (<span style="color:#a6e22e">e</span> <span style="color:#f92672">*</span><span style="color:#a6e22e">Endorser</span>) <span style="color:#a6e22e">ProcessProposal</span>(<span style="color:#a6e22e">signedProp</span> <span style="color:#f92672">*</span><span style="color:#a6e22e">pb</span>.<span style="color:#a6e22e">SignedProposal</span>) (<span style="color:#f92672">*</span><span style="color:#a6e22e">pb</span>.<span style="color:#a6e22e">ProposalResponse</span>) {
+    <span style="color:#75715e">// 返回没有零字段的 UnpackedProposal
+</span><span style="color:#75715e"></span>    <span style="color:#a6e22e">up</span> <span style="color:#f92672">:=</span> <span style="color:#a6e22e">UnpackProposal</span>(<span style="color:#a6e22e">signedProp</span>)
+
+    <span style="color:#75715e">// 第一步: 检查 proposal headers 合法性等
+</span><span style="color:#75715e"></span>    <span style="color:#75715e">// checks the tx proposal headers, uniqueness and ACL
+</span><span style="color:#75715e"></span>    <span style="color:#a6e22e">e</span>.<span style="color:#a6e22e">preProcess</span>(<span style="color:#a6e22e">up</span>, <span style="color:#a6e22e">channel</span>)
+
+    <span style="color:#75715e">// 预执行 Proposal
+</span><span style="color:#75715e"></span>    <span style="color:#a6e22e">pResp</span> <span style="color:#f92672">:=</span> <span style="color:#a6e22e">e</span>.<span style="color:#a6e22e">ProcessProposalSuccessfullyOrError</span>(<span style="color:#a6e22e">up</span>)
+    <span style="color:#66d9ef">return</span> <span style="color:#a6e22e">pResp</span>
+}
+
+<span style="color:#66d9ef">func</span> (<span style="color:#a6e22e">e</span> <span style="color:#f92672">*</span><span style="color:#a6e22e">Endorser</span>) <span style="color:#a6e22e">ProcessProposalSuccessfullyOrError</span>(<span style="color:#a6e22e">up</span> <span style="color:#f92672">*</span><span style="color:#a6e22e">UnpackedProposal</span>) (<span style="color:#f92672">*</span><span style="color:#a6e22e">pb</span>.<span style="color:#a6e22e">ProposalResponse</span>) {
+    <span style="color:#75715e">// 第二部: 根据 chaincode 模拟 proposal 执行结果,
+</span><span style="color:#75715e"></span>    <span style="color:#a6e22e">res</span>, <span style="color:#a6e22e">simulationResult</span>, <span style="color:#a6e22e">ccevent</span> <span style="color:#f92672">:=</span> <span style="color:#a6e22e">e</span>.<span style="color:#a6e22e">SimulateProposal</span>(<span style="color:#a6e22e">txParams</span>, <span style="color:#a6e22e">up</span>.<span style="color:#a6e22e">ChaincodeName</span>, <span style="color:#a6e22e">up</span>.<span style="color:#a6e22e">Input</span>)
+    
+    <span style="color:#75715e">// 封装事物执行的结果
+</span><span style="color:#75715e"></span>    <span style="color:#a6e22e">simResult</span>, <span style="color:#a6e22e">err</span> <span style="color:#f92672">:=</span> <span style="color:#a6e22e">txParams</span>.<span style="color:#a6e22e">TXSimulator</span>.<span style="color:#a6e22e">GetTxSimulationResults</span>()
+}
+
+<span style="color:#66d9ef">func</span> (<span style="color:#a6e22e">e</span> <span style="color:#f92672">*</span><span style="color:#a6e22e">Endorser</span>) <span style="color:#a6e22e">SimulateProposal</span>(<span style="color:#f92672">...</span>) (<span style="color:#f92672">*</span><span style="color:#a6e22e">pb</span>.<span style="color:#a6e22e">Response</span>, []<span style="color:#66d9ef">byte</span>, <span style="color:#f92672">*</span><span style="color:#a6e22e">pb</span>.<span style="color:#a6e22e">ChaincodeEvent</span>, <span style="color:#66d9ef">error</span>) {
+    <span style="color:#f92672">...</span>
+    <span style="color:#75715e">// ---执行提案并获取结果 调用链最后调用 handleTransaction函数
+</span><span style="color:#75715e"></span>    <span style="color:#75715e">// =&gt; e.Support.Execute(txParams, chaincodeName, input) =&gt; handleTransaction(...)
+</span><span style="color:#75715e"></span>    <span style="color:#a6e22e">res</span>, <span style="color:#a6e22e">ccevent</span>, <span style="color:#a6e22e">err</span> <span style="color:#f92672">:=</span> <span style="color:#a6e22e">e</span>.<span style="color:#a6e22e">callChaincode</span>(<span style="color:#a6e22e">txParams</span>, <span style="color:#a6e22e">chaincodeInput</span>, <span style="color:#a6e22e">chaincodeName</span>)
+
+    <span style="color:#75715e">// 封装事物执行的结果
+</span><span style="color:#75715e"></span>    <span style="color:#a6e22e">simResult</span>, <span style="color:#a6e22e">err</span> <span style="color:#f92672">:=</span> <span style="color:#a6e22e">txParams</span>.<span style="color:#a6e22e">TXSimulator</span>.<span style="color:#a6e22e">GetTxSimulationResults</span>()
+    
+    <span style="color:#75715e">// 添加与私有读写集相关的可用集合配置信息
+</span><span style="color:#75715e"></span>    <span style="color:#a6e22e">pvtDataWithConfig</span>, <span style="color:#a6e22e">err</span> <span style="color:#f92672">:=</span> <span style="color:#a6e22e">AssemblePvtRWSet</span>(<span style="color:#a6e22e">txParams</span>.<span style="color:#a6e22e">ChannelID</span>, <span style="color:#a6e22e">simResult</span>.<span style="color:#a6e22e">PvtSimulationResults</span>, <span style="color:#a6e22e">txParams</span>.<span style="color:#a6e22e">TXSimulator</span>, <span style="color:#a6e22e">e</span>.<span style="color:#a6e22e">Support</span>.<span style="color:#a6e22e">GetDeployedCCInfoProvider</span>())
+	
+    <span style="color:#75715e">// 根据组织集合的策略将私有数据通过 gossip 分发给授权的节点。
+</span><span style="color:#75715e"></span>    <span style="color:#a6e22e">e</span>.<span style="color:#a6e22e">PrivateDataDistributor</span>.<span style="color:#a6e22e">DistributePrivateData</span>(<span style="color:#a6e22e">txParams</span>.<span style="color:#a6e22e">ChannelID</span>, <span style="color:#a6e22e">txParams</span>.<span style="color:#a6e22e">TxID</span>, <span style="color:#a6e22e">pvtDataWithConfig</span>, <span style="color:#a6e22e">endorsedAt</span>)
+    
+    <span style="color:#75715e">// 返回公共读写集， 不返回私有数据
+</span><span style="color:#75715e"></span>    <span style="color:#a6e22e">pubSimResBytes</span>, <span style="color:#a6e22e">err</span> <span style="color:#f92672">:=</span> <span style="color:#a6e22e">simResult</span>.<span style="color:#a6e22e">GetPubSimulationBytes</span>()
+    <span style="color:#66d9ef">return</span> <span style="color:#a6e22e">res</span>, <span style="color:#a6e22e">pubSimResBytes</span>, <span style="color:#a6e22e">ccevent</span>, <span style="color:#66d9ef">nil</span>
+}
+
+<span style="color:#75715e">// 调用 chaincode
+</span><span style="color:#75715e">// vendor/github.com/hyperledger/fabric-chaincode-go/shim/handler.go#L195
+</span><span style="color:#75715e"></span><span style="color:#66d9ef">func</span> (<span style="color:#a6e22e">h</span> <span style="color:#f92672">*</span><span style="color:#a6e22e">Handler</span>) <span style="color:#a6e22e">handleTransaction</span>(<span style="color:#a6e22e">msg</span> <span style="color:#f92672">*</span><span style="color:#a6e22e">pb</span>.<span style="color:#a6e22e">ChaincodeMessage</span>) (<span style="color:#f92672">*</span><span style="color:#a6e22e">pb</span>.<span style="color:#a6e22e">ChaincodeMessage</span>, <span style="color:#66d9ef">error</span>) {
+    <span style="color:#75715e">// Invoke is called to update or query the ledger in a proposal transaction.
+</span><span style="color:#75715e"></span>    <span style="color:#75715e">// Updated state variables are not committed to the ledger until the
+</span><span style="color:#75715e"></span>    <span style="color:#75715e">// transaction is committed.
+</span><span style="color:#75715e"></span>    <span style="color:#75715e">// 根据 proposal 更新、查询账本，但在交易 transaction 被提交前数据更改不会体现在账本上
+</span><span style="color:#75715e"></span>    <span style="color:#75715e">// 返回执行结果, 具体的执行逻辑由 chaincode 定义。
+</span><span style="color:#75715e"></span>    <span style="color:#a6e22e">res</span> <span style="color:#f92672">:=</span> <span style="color:#a6e22e">h</span>.<span style="color:#a6e22e">cc</span>.<span style="color:#a6e22e">Invoke</span>(<span style="color:#a6e22e">stub</span>)
+}
+
+</code></pre></div><!-- raw HTML omitted -->
+<p>对私有消息的处理(DistributePrivateData): 节点分发私有数据到被授权节点，这些节点暂存收到的私有数据</p>
+<div class="highlight"><pre style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4"><code class="language-go" data-lang="go"><span style="color:#75715e">// 初始化 gossip 节点时为消息接受配置规则
+</span><span style="color:#75715e"></span><span style="color:#66d9ef">func</span> <span style="color:#a6e22e">NewGossipStateProvider</span>(<span style="color:#f92672">...</span>) {
+    <span style="color:#f92672">...</span>
+    <span style="color:#75715e">// commChan 远程peer的请求或响应信息
+</span><span style="color:#75715e"></span>    <span style="color:#75715e">// 实现方式 : 在 ChannelDeMultiplexer 注册消息订阅, 满足过滤规则 remoteStateMsgFilter 消息会塞到 commChan 中
+</span><span style="color:#75715e"></span>    <span style="color:#75715e">// remoteStateMsgFilter 包括权限、chan等检测
+</span><span style="color:#75715e"></span>    <span style="color:#a6e22e">_</span>, <span style="color:#a6e22e">commChan</span> <span style="color:#f92672">:=</span> <span style="color:#a6e22e">services</span>.<span style="color:#a6e22e">Accept</span>(<span style="color:#a6e22e">remoteStateMsgFilter</span>, <span style="color:#66d9ef">true</span>)
+    <span style="color:#f92672">...</span>
+    <span style="color:#75715e">// 消息监听处理
+</span><span style="color:#75715e"></span>    <span style="color:#66d9ef">go</span> <span style="color:#a6e22e">s</span>.<span style="color:#a6e22e">receiveAndDispatchDirectMessages</span>(<span style="color:#a6e22e">commChan</span>)
+}
+
+<span style="color:#75715e">// 处理收到的数据
+</span><span style="color:#75715e"></span><span style="color:#66d9ef">func</span> (<span style="color:#a6e22e">s</span> <span style="color:#f92672">*</span><span style="color:#a6e22e">GossipStateProviderImpl</span>) <span style="color:#a6e22e">receiveAndDispatchDirectMessages</span>(<span style="color:#a6e22e">ch</span> <span style="color:#f92672">&lt;-</span><span style="color:#66d9ef">chan</span> <span style="color:#a6e22e">protoext</span>.<span style="color:#a6e22e">ReceivedMessage</span>) {
+	<span style="color:#66d9ef">for</span> <span style="color:#a6e22e">msg</span> <span style="color:#f92672">:=</span> <span style="color:#66d9ef">range</span> <span style="color:#a6e22e">ch</span> {
+		<span style="color:#66d9ef">go</span> <span style="color:#66d9ef">func</span>(<span style="color:#a6e22e">msg</span> <span style="color:#a6e22e">protoext</span>.<span style="color:#a6e22e">ReceivedMessage</span>) {
+                    <span style="color:#f92672">...</span>
+		    <span style="color:#66d9ef">if</span> <span style="color:#a6e22e">gm</span>.<span style="color:#a6e22e">GetPrivateData</span>() <span style="color:#f92672">!=</span> <span style="color:#66d9ef">nil</span> {
+                        <span style="color:#75715e">// 处理收到的私有数据(暂存), 调用链最后到 Persist()
+</span><span style="color:#75715e"></span>                        <span style="color:#75715e">// =&gt; Persist()
+</span><span style="color:#75715e"></span>                        <span style="color:#a6e22e">s</span>.<span style="color:#a6e22e">privateDataMessage</span>(<span style="color:#a6e22e">msg</span>)
+                    }
+		}(<span style="color:#a6e22e">msg</span>)
+	}
+}
+
+<span style="color:#75715e">// 其他授权节点收到私有数据将其暂存在 transient store
+</span><span style="color:#75715e">// https://github.com/hyperledger/fabric/blob/07c468def167e83ea85d46d795113a98cb6081a1/core/transientstore/store.go#L103s
+</span><span style="color:#75715e">// 根据 txid 和 block 高度存储
+</span><span style="color:#75715e"></span><span style="color:#66d9ef">func</span> (<span style="color:#a6e22e">s</span> <span style="color:#f92672">*</span><span style="color:#a6e22e">Store</span>) <span style="color:#a6e22e">Persist</span>(<span style="color:#f92672">...</span>) <span style="color:#66d9ef">error</span> {}
+</code></pre></div><!-- raw HTML omitted -->
+<h3 id="三-排序节点">三、 排序节点</h3>
+<p>Orderer(排序节点)对接收到的 Envelope message 进行排序，然后按照区块生成策略，将一批交易打包到一起，生成新的区块。在网络中共识(solo,raft,kafka，本文以raft为例)，完成所有节点账本的更新。带有私有数据哈希的区块被分发给所有节点。这样节点可以在不知道真实私有数据的情况下，来验证带有私有数据哈希值的交易。</p>
+<div class="highlight"><pre style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4"><code class="language-go" data-lang="go"><span style="color:#75715e">// ProcessMessage validates and enqueues a single message
+</span><span style="color:#75715e"></span><span style="color:#66d9ef">func</span> (<span style="color:#a6e22e">bh</span> <span style="color:#f92672">*</span><span style="color:#a6e22e">Handler</span>) <span style="color:#a6e22e">ProcessMessage</span>(<span style="color:#a6e22e">msg</span> <span style="color:#f92672">*</span><span style="color:#a6e22e">cb</span>.<span style="color:#a6e22e">Envelope</span>, <span style="color:#a6e22e">addr</span> <span style="color:#66d9ef">string</span>) (<span style="color:#a6e22e">resp</span> <span style="color:#f92672">*</span><span style="color:#a6e22e">ab</span>.<span style="color:#a6e22e">BroadcastResponse</span>) {
+    <span style="color:#75715e">// 合法性验证
+</span><span style="color:#75715e"></span>    <span style="color:#f92672">...</span>
+    <span style="color:#75715e">// 调用 chan 的共识进行排序(solo, raft, kafka)
+</span><span style="color:#75715e"></span>    <span style="color:#a6e22e">processor</span>.<span style="color:#a6e22e">Order</span>(<span style="color:#a6e22e">msg</span>, <span style="color:#a6e22e">configSeq</span>)
+}
+</code></pre></div><!-- raw HTML omitted -->
+<p>共识算法：<a href="https://www.jianshu.com/p/8e4bbe7e276c">Raft 介绍</a>, 有时间可以再写一下 etcd raft 的实现</p>
+<div class="highlight"><pre style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4"><code class="language-go" data-lang="go"><span style="color:#75715e">// 
+</span><span style="color:#75715e"></span><span style="color:#66d9ef">func</span> (<span style="color:#a6e22e">c</span> <span style="color:#f92672">*</span><span style="color:#a6e22e">Chain</span>) <span style="color:#a6e22e">Submit</span>(<span style="color:#a6e22e">req</span> <span style="color:#f92672">*</span><span style="color:#a6e22e">orderer</span>.<span style="color:#a6e22e">SubmitRequest</span>, <span style="color:#a6e22e">sender</span> <span style="color:#66d9ef">uint64</span>) <span style="color:#66d9ef">error</span> {
+    <span style="color:#66d9ef">select</span> {
+	<span style="color:#66d9ef">case</span> <span style="color:#a6e22e">c</span>.<span style="color:#a6e22e">submitC</span> <span style="color:#f92672">&lt;-</span> <span style="color:#f92672">&amp;</span><span style="color:#a6e22e">submit</span>{<span style="color:#a6e22e">req</span>, <span style="color:#a6e22e">leadC</span>}:
+        <span style="color:#a6e22e">lead</span> <span style="color:#f92672">:=</span> <span style="color:#f92672">&lt;-</span><span style="color:#a6e22e">leadC</span>
+        <span style="color:#75715e">// 没有leader，返回错误 
+</span><span style="color:#75715e"></span>        <span style="color:#66d9ef">if</span> <span style="color:#a6e22e">lead</span> <span style="color:#f92672">==</span> <span style="color:#a6e22e">raft</span>.<span style="color:#a6e22e">None</span> {
+            <span style="color:#66d9ef">return</span> <span style="color:#a6e22e">errors</span>.<span style="color:#a6e22e">Errorf</span>(<span style="color:#e6db74">&#34;no Raft leader&#34;</span>)
+        }
+
+        <span style="color:#66d9ef">if</span> <span style="color:#a6e22e">lead</span> <span style="color:#f92672">!=</span> <span style="color:#a6e22e">c</span>.<span style="color:#a6e22e">raftID</span> {
+            <span style="color:#75715e">// 该节点不是 leader, 发送请求到 leader 节点
+</span><span style="color:#75715e"></span>            <span style="color:#66d9ef">if</span> <span style="color:#a6e22e">err</span> <span style="color:#f92672">:=</span> <span style="color:#a6e22e">c</span>.<span style="color:#a6e22e">rpc</span>.<span style="color:#a6e22e">SendSubmit</span>(<span style="color:#a6e22e">lead</span>, <span style="color:#a6e22e">req</span>); <span style="color:#a6e22e">err</span> <span style="color:#f92672">!=</span> <span style="color:#66d9ef">nil</span> {
+                <span style="color:#66d9ef">return</span> <span style="color:#a6e22e">err</span>
+            }
+        }
+    }    
+}
+
+<span style="color:#66d9ef">func</span> (<span style="color:#a6e22e">c</span> <span style="color:#f92672">*</span><span style="color:#a6e22e">Chain</span>) <span style="color:#a6e22e">run</span>() {
+    <span style="color:#f92672">...</span>
+    <span style="color:#66d9ef">select</span> {
+        <span style="color:#75715e">// leader 对 Envelope message 的处理
+</span><span style="color:#75715e"></span>        <span style="color:#66d9ef">case</span> <span style="color:#a6e22e">s</span> <span style="color:#f92672">:=</span> <span style="color:#f92672">&lt;-</span><span style="color:#a6e22e">submitC</span>:
+            <span style="color:#75715e">// batches 请求裁剪成[]Env、pending 判断是否有待排序的Env
+</span><span style="color:#75715e"></span>            <span style="color:#a6e22e">batches</span>, <span style="color:#a6e22e">pending</span>, <span style="color:#a6e22e">err</span> <span style="color:#f92672">:=</span> <span style="color:#a6e22e">c</span>.<span style="color:#a6e22e">ordered</span>(<span style="color:#a6e22e">s</span>.<span style="color:#a6e22e">req</span>)
+            
+            <span style="color:#75715e">// =&gt; createNextBlock
+</span><span style="color:#75715e"></span>            <span style="color:#a6e22e">block</span> <span style="color:#f92672">:=</span> <span style="color:#a6e22e">c</span>.<span style="color:#a6e22e">propose</span>(<span style="color:#a6e22e">propC</span>, <span style="color:#a6e22e">bc</span>, <span style="color:#a6e22e">batches</span><span style="color:#f92672">...</span>)
+            
+            <span style="color:#75715e">// leader 提议添加新的日志
+</span><span style="color:#75715e"></span>            <span style="color:#75715e">// raft 共识，收集足够的票完成 commit
+</span><span style="color:#75715e"></span>            <span style="color:#a6e22e">c</span>.<span style="color:#a6e22e">Node</span>.<span style="color:#a6e22e">Propose</span>(<span style="color:#a6e22e">ctx</span>, <span style="color:#a6e22e">block</span>)
+        
+        <span style="color:#75715e">// 达成共识后，更新账本    
+</span><span style="color:#75715e"></span>        <span style="color:#66d9ef">case</span> <span style="color:#a6e22e">app</span> <span style="color:#f92672">:=</span> <span style="color:#f92672">&lt;-</span><span style="color:#a6e22e">c</span>.<span style="color:#a6e22e">applyC</span>: 
+            <span style="color:#75715e">// =&gt; c.support.WriteBlock(block, m) 提交 block 到账本
+</span><span style="color:#75715e"></span>            <span style="color:#a6e22e">c</span>.<span style="color:#a6e22e">apply</span>(<span style="color:#a6e22e">app</span>.<span style="color:#a6e22e">entries</span>)
+    }
+    <span style="color:#f92672">...</span>
+} 
+</code></pre></div><!-- raw HTML omitted -->
+<p><strong>节点存储区块</strong>
+在区块提交的时候，节点会根据集合策略来决定它们是否有权访问私有数据。如果有访问权，则先检查本地 transient data store ，以确定它们是否在链码背书的时候已经接收到了私有数据。如果没有收到私有数据，就会尝试向其他已授权节点请求私有数据，然后对照公共区块上的哈希值来验证私有数据并提交交易和区块。
+当验证或提交结束后，私有数据会被移动到这些节点私有数据库和私有读写存储的副本中。随后 transient data store 中存储的这些私有数据会被删除。</p>
+<div class="highlight"><pre style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4"><code class="language-go" data-lang="go"><span style="color:#75715e">// 处理 order 节点发来的消息
+</span><span style="color:#75715e"></span><span style="color:#66d9ef">func</span> (<span style="color:#a6e22e">s</span> <span style="color:#f92672">*</span><span style="color:#a6e22e">GossipStateProviderImpl</span>) <span style="color:#a6e22e">deliverPayloads</span>() {
+    <span style="color:#75715e">// 提交区块
+</span><span style="color:#75715e"></span>    <span style="color:#75715e">// =&gt; StoreBlock()
+</span><span style="color:#75715e"></span>    <span style="color:#a6e22e">s</span>.<span style="color:#a6e22e">commitBlock</span>(<span style="color:#a6e22e">rawBlock</span>, <span style="color:#a6e22e">p</span>)
+}
+
+<span style="color:#75715e">// 存储 block 和 私有数据
+</span><span style="color:#75715e"></span><span style="color:#66d9ef">func</span> (<span style="color:#a6e22e">c</span> <span style="color:#f92672">*</span><span style="color:#a6e22e">coordinator</span>) <span style="color:#a6e22e">StoreBlock</span>(<span style="color:#a6e22e">block</span> <span style="color:#f92672">*</span><span style="color:#a6e22e">common</span>.<span style="color:#a6e22e">Block</span>, <span style="color:#a6e22e">privateDataSets</span> <span style="color:#a6e22e">util</span>.<span style="color:#a6e22e">PvtDataCollections</span>) <span style="color:#66d9ef">error</span> {
+	<span style="color:#75715e">// ... 合法性检测
+</span><span style="color:#75715e"></span>	<span style="color:#a6e22e">blockAndPvtData</span> <span style="color:#f92672">:=</span> <span style="color:#f92672">&amp;</span><span style="color:#a6e22e">ledger</span>.<span style="color:#a6e22e">BlockAndPvtData</span>{
+		<span style="color:#a6e22e">Block</span>:          <span style="color:#a6e22e">block</span>,
+		<span style="color:#a6e22e">PvtData</span>:        make(<span style="color:#a6e22e">ledger</span>.<span style="color:#a6e22e">TxPvtDataMap</span>),
+		<span style="color:#a6e22e">MissingPvtData</span>: make(<span style="color:#a6e22e">ledger</span>.<span style="color:#a6e22e">TxMissingPvtDataMap</span>),
+	}
+
+    <span style="color:#75715e">// 查询是否能从本地账本获取到私有数据
+</span><span style="color:#75715e"></span>    <span style="color:#a6e22e">exist</span> <span style="color:#f92672">:=</span> <span style="color:#a6e22e">c</span>.<span style="color:#a6e22e">DoesPvtDataInfoExistInLedger</span>(<span style="color:#a6e22e">block</span>.<span style="color:#a6e22e">Header</span>.<span style="color:#a6e22e">Number</span>)
+    <span style="color:#66d9ef">if</span> <span style="color:#a6e22e">exist</span> {
+        <span style="color:#75715e">// 从账本获取私有数据
+</span><span style="color:#75715e"></span>        <span style="color:#a6e22e">commitOpts</span> <span style="color:#f92672">:=</span> <span style="color:#f92672">&amp;</span><span style="color:#a6e22e">ledger</span>.<span style="color:#a6e22e">CommitOptions</span>{<span style="color:#a6e22e">FetchPvtDataFromLedger</span>: <span style="color:#66d9ef">true</span>}
+        <span style="color:#75715e">// 私有数据已存在，提交 block 和私有数据
+</span><span style="color:#75715e"></span>    	<span style="color:#66d9ef">return</span> <span style="color:#a6e22e">c</span>.<span style="color:#a6e22e">CommitLegacy</span>(<span style="color:#a6e22e">blockAndPvtData</span>, <span style="color:#a6e22e">commitOpts</span>)
+    }
+    <span style="color:#f92672">...</span>
+    <span style="color:#75715e">//  解析区块，获取私有数据列表
+</span><span style="color:#75715e"></span>    <span style="color:#a6e22e">pvtdataToRetrieve</span>, <span style="color:#a6e22e">err</span> <span style="color:#f92672">:=</span> <span style="color:#a6e22e">c</span>.<span style="color:#a6e22e">getTxPvtdataInfoFromBlock</span>(<span style="color:#a6e22e">block</span>)
+
+    <span style="color:#75715e">// 获取私有数据
+</span><span style="color:#75715e"></span>    <span style="color:#75715e">// 这一步会检查节点的资格，然后从缓存，临时存储 TRANSIENT STORE 或其他节点检索
+</span><span style="color:#75715e"></span>    <span style="color:#a6e22e">retrievedPvtdata</span>, <span style="color:#a6e22e">err</span> <span style="color:#f92672">:=</span> <span style="color:#a6e22e">pdp</span>.<span style="color:#a6e22e">RetrievePvtdata</span>(<span style="color:#a6e22e">pvtdataToRetrieve</span>)
+    <span style="color:#a6e22e">blockAndPvtData</span>.<span style="color:#a6e22e">PvtData</span> = <span style="color:#a6e22e">retrievedPvtdata</span>.<span style="color:#a6e22e">blockPvtdata</span>.<span style="color:#a6e22e">PvtData</span>
+    <span style="color:#a6e22e">blockAndPvtData</span>.<span style="color:#a6e22e">MissingPvtData</span> = <span style="color:#a6e22e">retrievedPvtdata</span>.<span style="color:#a6e22e">blockPvtdata</span>.<span style="color:#a6e22e">MissingPvtData</span>
+
+    <span style="color:#75715e">// 提交 block 和私有数据
+</span><span style="color:#75715e"></span>    <span style="color:#a6e22e">c</span>.<span style="color:#a6e22e">CommitLegacy</span>(<span style="color:#a6e22e">blockAndPvtData</span>, <span style="color:#f92672">&amp;</span><span style="color:#a6e22e">ledger</span>.<span style="color:#a6e22e">CommitOptions</span>{})
+
+    <span style="color:#75715e">// 清除工作
+</span><span style="color:#75715e"></span>    <span style="color:#a6e22e">retrievedPvtdata</span>.<span style="color:#a6e22e">Purge</span>()
+}
+
+</code></pre></div><!-- raw HTML omitted -->
+<h2 id="附录">附录</h2>
+<h3 id="span-idpdc私有数据httpsstone-fabricreadthedocsioenlatestprivate-dataprivate-datahtmlspan"><!-- raw HTML omitted --><a href="https://stone-fabric.readthedocs.io/en/latest/private-data/private-data.html">私有数据</a><!-- raw HTML omitted --></h3>
+<p>在某个通道上的一组组织需要对该通道上的其他组织保持数据私密的情况下，它们可以选择创建一个新通道，其中只包含需要访问数据的组织。但是，在每一种情况下创建单独的通道会产生额外的管理开销（维护链码版本、策略、MSP 等），并且不允许在保持部分数据私有的同时，让所有通道参与者都看到交易。</p>
+<blockquote>
+<p><strong>在通道内什么时候使用私有数据集，什么时候使用单独通道</strong></p>
+<ul>
+<li>当通道成员的一群组织必须对所有交易（和账本）保密时，使用通道。</li>
+<li>当交易（和账本）必须在一群组织间共享，并且这些组织中只有一部分组织可以访问交易中一些（或全部）私有数据时，使用集合。此外，由于私有数据是点对点传播的，而不是通过区块传播，所以当交易数据必须对排序服务节点保密时，应该使用私有数据集合。
+<a href="#bg">返回正文</a></li>
+</ul>
+</blockquote>
+
+
+      
+        <div class="blog-tags">
+          
+            <a href="https://yinminghao.top//tags/fabric/">fabric</a>&nbsp;
+          
+        </div>
+      
+    </article>
+    
+    
+    <div id="disqus_thread"></div>
+    <script type="text/javascript">
+        (function() {
+            
+            
+            if (window.location.hostname == "localhost") return;
+
+            var dsq = document.createElement('script');
+            dsq.type = 'text/javascript';
+            dsq.async = true;
+            var disqus_shortname = 'yourdisqusshortname';
+            dsq.src = '//' + disqus_shortname + '.disqus.com/embed.js';
+            (document.getElementsByTagName('head')[0] || document.getElementsByTagName('body')[0]).appendChild(dsq);
+        })();
+    </script>
+    <noscript>Please enable JavaScript to view the <a href="https://disqus.com/?ref_noscript">comments powered by Disqus.</a></noscript>
+    <a href="https://disqus.com/" class="dsq-brlink">comments powered by <span class="logo-disqus">Disqus</span></a>
+
+  </div>
+
+    <footer>
+  <div class="container">
+    <p class="credits copyright">
+      <a href="https://yinminghao.top/about">Hugo Author</a>
+      &nbsp;&copy;
+      2020
+
+      
+        &nbsp;/&nbsp;
+        <a href="https://yinminghao.top/">Hugo Themes</a>
+      
+
+      &nbsp;&ndash;&nbsp;
+      <i class="fas fa-moon" id="dark-mode-toggle"></i>
+
+      <p class="credits theme-by">
+        Powered By <a href="https://gohugo.io">Hugo</a>&nbsp;Theme <a href="https://github.com/matsuyoshi30/harbor">Harbor</a>
+      </p>
+    </p>
+  </div>
+</footer>
+
+  </body>
+</html>

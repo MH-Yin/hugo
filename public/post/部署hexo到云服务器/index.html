@@ -1,0 +1,269 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+<title>部署hexo到云服务器</title>
+
+
+  
+  
+  <script async src="https://www.googletagmanager.com/gtag/js?id=UA-XXXXXXXX-XX"></script>
+  <script>
+    window.dataLayer = window.dataLayer || [];
+    function gtag(){dataLayer.push(arguments);}
+    gtag('js', new Date());
+    gtag('config', 'UA-XXXXXXXX-XX');
+  </script>
+  
+
+
+<meta http-equiv="X-UA-Compatible" content="IE=edge" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<link rel="alternate" type="application/rss+xml" href="https://yinminghao.top/index.xml" title="Hugo Themes">
+
+<link id="dark-mode-theme" rel="stylesheet" href="https://yinminghao.top/css/dark.css" />
+<link rel="stylesheet" href="https://yinminghao.top/fontawesome/css/all.min.css" />
+
+<script src="https://yinminghao.top/js/bundle.js"></script>
+<script src="https://yinminghao.top/js/instantpage.js" type="module" defer></script>
+<meta name="generator" content="Hugo 0.74.3" />
+  </head>
+  <body>
+    
+  
+
+
+
+
+  <header>
+    <nav class="navbar">
+  <div class="nav">
+    
+      <a href="https://yinminghao.top/" class="nav-logo">
+      <img src="https://yinminghao.top/images/icon.png"
+           width="50"
+           height="50"
+           alt="Logo">
+      </a>
+    
+
+    <ul class="nav-links">
+      
+        
+          <li><a href="/about/" name="About"><i class="fas fa-user fa-lg"></i></a></li>
+        
+      
+        
+          <li><a href="/tags" name="Tags"><i class="fas fa-tag fa-lg"></i></a></li>
+        
+      
+        
+          <li><a href="/categories" name="Category"><i class="fas fa-folder-open fa-lg"></i></a></li>
+        
+      
+        
+          <li><a href="/search" name="Search"><i class="fas fa-search fa-lg"></i></a></li>
+        
+      
+        
+          <li><a href="/archives" name="Archives"><i class="fas fa-archive fa-lg"></i></a></li>
+        
+      
+    </ul>
+  </div>
+</nav>
+
+    <div class="intro-header">
+      <div class="container">
+        <div class="post-heading">
+          
+            <h1>部署hexo到云服务器</h1>
+          
+          
+            <span class="meta-post">
+  <i class="fa fa-calendar-alt"></i>&nbsp;Aug 3, 2020
+  
+</span>
+
+          
+        </div>
+      </div>
+    </div>
+  </header>
+
+
+    
+  <div class="container" role="main">
+    <article class="article" class="blog-post">
+      
+    <blockquote>
+<p><strong>搜到的一般操作都是部署到github的静态页面上，个人因为先前买了一个阿里云服务器一直闲置，干脆就部署到阿里云上好了</strong></p>
+</blockquote>
+<p><strong>以下部署过程以ubuntu18.04(1核1G)为例</strong></p>
+<h2 id="预装环境">预装环境</h2>
+<ul>
+<li>安装 hexo (过程中出现问题可查阅<a href="#q1">附录</a>)
+<div class="highlight"><pre style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4"><code class="language-shell" data-lang="shell"><span style="color:#75715e"># 安装 node 与 npm</span> 
+$ sudo apt install nodejs
+<span style="color:#75715e"># 安装 hexo</span>
+$ npm install hexo-cli -g
+</code></pre></div></li>
+<li>安装 git
+<div class="highlight"><pre style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4"><code class="language-shell" data-lang="shell">$ sudo apt install git-all
+</code></pre></div></li>
+<li>安装 nginx
+<div class="highlight"><pre style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4"><code class="language-shell" data-lang="shell">$ sudo apt install nginx
+</code></pre></div></li>
+</ul>
+<h2 id="推送到远程服务器">推送到远程服务器</h2>
+<ul>
+<li>设置同步方式 : 编辑 blog/_config.yaml,  增加 rSync 同步方式
+<pre><code>deploy:
+    type: rsync
+    host: **.**.**.** # 你的服务器ip
+    user: root
+    root: /usr/local/nginx/***.blog/ # 文件存放位置
+    port: 22
+</code></pre></li>
+<li>配置 git hook : blog/hooks/pre-push.sh, 在 每次git push后触发
+<div class="highlight"><pre style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4"><code class="language-shell" data-lang="shell">    <span style="color:#75715e">#!/bin/sh</span>
+    <span style="color:#75715e"># 推送到远程服务器</span>
+    hexo g -d 
+</code></pre></div></li>
+</ul>
+<h2 id="配置nginx">配置nginx</h2>
+<ol>
+<li>配置 <a href="#q2">hexo.conf</a>
+<div class="highlight"><pre style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4"><code class="language-shell" data-lang="shell">$ sudo vi /etc/nginx/conf.d/hexo.conf
+</code></pre></div></li>
+<li>配置全局 <a href="#q3">nginx.conf</a>
+<div class="highlight"><pre style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4"><code class="language-shell" data-lang="shell">$ sudo vi /etc/nginx/nginx.conf
+</code></pre></div></li>
+<li>重启 nginx
+<pre><code>$ service nginx restart
+</code></pre></li>
+</ol>
+<h2 id="附录">附录</h2>
+<h3 id="span-idq1预装环境时出现的问题span"><!-- raw HTML omitted -->预装环境时出现的问题<!-- raw HTML omitted --></h3>
+<ul>
+<li>node 版本过低
+<div class="highlight"><pre style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4"><code class="language-shell" data-lang="shell"><span style="color:#75715e"># 安装 node 版本管理工具</span>
+$ npm i -g n <span style="color:#75715e"># 失败了可以试下 npm i -g n --force</span>
+<span style="color:#75715e"># 安装最近的稳定版本</span>
+$ n stable
+</code></pre></div></li>
+<li>npm 版本过低
+<div class="highlight"><pre style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4"><code class="language-shell" data-lang="shell">$ npm i npm -g
+</code></pre></div></li>
+<li>ENOENT: no such file or directory, open &lsquo;/Users/xxx/package.json&rsquo;
+<pre><code>$ npm init
+</code></pre></li>
+</ul>
+<h3 id="nginx-配置">nginx 配置</h3>
+<ul>
+<li><!-- raw HTML omitted -->hexo.conf<!-- raw HTML omitted -->
+<pre><code>server {
+    listen 80;
+    listen [::]:80;
+    server_name yinminghao.top; # 自己的域名
+    root /usr/local/nginx/ymh.blog;
+    access_log access.log;
+    error_log error.log;
+
+    location / {
+        # First attempt to serve request as file, then
+        # as directory, then fall back to displaying a 404.
+        try_files $uri $uri/ =404;
+    }
+}
+</code></pre></li>
+<li><!-- raw HTML omitted -->nginx.conf<!-- raw HTML omitted -->
+<pre><code>    user root;
+    worker_processes  1;
+
+    error_log  /var/log/nginx/error.log warn;
+    pid        /var/run/nginx.pid;
+
+
+    events {
+        worker_connections  1024;
+    }
+
+
+    http {
+        include       /etc/nginx/mime.types;
+        default_type  application/octet-stream;
+
+        log_format  main  '$remote_addr - $remote_user [$time_local] &quot;$request&quot; '
+                        '$status $body_bytes_sent &quot;$http_referer&quot; '
+                        '&quot;$http_user_agent&quot; &quot;$http_x_forwarded_for&quot;';
+
+        access_log  /var/log/nginx/access.log  main;
+
+        sendfile        on;
+        #tcp_nopush     on;
+
+        keepalive_timeout  65;
+
+        gzip  on;
+
+        include /etc/nginx/conf.d/*.conf;
+    }
+</code></pre></li>
+</ul>
+
+
+      
+        <div class="blog-tags">
+          
+            <a href="https://yinminghao.top//tags/%E8%BF%90%E7%BB%B4%E9%83%A8%E7%BD%B2/">运维部署</a>&nbsp;
+          
+        </div>
+      
+    </article>
+    
+    
+    <div id="disqus_thread"></div>
+    <script type="text/javascript">
+        (function() {
+            
+            
+            if (window.location.hostname == "localhost") return;
+
+            var dsq = document.createElement('script');
+            dsq.type = 'text/javascript';
+            dsq.async = true;
+            var disqus_shortname = 'yourdisqusshortname';
+            dsq.src = '//' + disqus_shortname + '.disqus.com/embed.js';
+            (document.getElementsByTagName('head')[0] || document.getElementsByTagName('body')[0]).appendChild(dsq);
+        })();
+    </script>
+    <noscript>Please enable JavaScript to view the <a href="https://disqus.com/?ref_noscript">comments powered by Disqus.</a></noscript>
+    <a href="https://disqus.com/" class="dsq-brlink">comments powered by <span class="logo-disqus">Disqus</span></a>
+
+  </div>
+
+    <footer>
+  <div class="container">
+    <p class="credits copyright">
+      <a href="https://yinminghao.top/about">Hugo Author</a>
+      &nbsp;&copy;
+      2020
+
+      
+        &nbsp;/&nbsp;
+        <a href="https://yinminghao.top/">Hugo Themes</a>
+      
+
+      &nbsp;&ndash;&nbsp;
+      <i class="fas fa-moon" id="dark-mode-toggle"></i>
+
+      <p class="credits theme-by">
+        Powered By <a href="https://gohugo.io">Hugo</a>&nbsp;Theme <a href="https://github.com/matsuyoshi30/harbor">Harbor</a>
+      </p>
+    </p>
+  </div>
+</footer>
+
+  </body>
+</html>

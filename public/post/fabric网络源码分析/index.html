@@ -1,0 +1,559 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+<title>Fabric网络源码分析</title>
+
+
+  
+  
+  <script async src="https://www.googletagmanager.com/gtag/js?id=UA-XXXXXXXX-XX"></script>
+  <script>
+    window.dataLayer = window.dataLayer || [];
+    function gtag(){dataLayer.push(arguments);}
+    gtag('js', new Date());
+    gtag('config', 'UA-XXXXXXXX-XX');
+  </script>
+  
+
+
+<meta http-equiv="X-UA-Compatible" content="IE=edge" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<link rel="alternate" type="application/rss+xml" href="https://yinminghao.top/index.xml" title="Hugo Themes">
+
+<link id="dark-mode-theme" rel="stylesheet" href="https://yinminghao.top/css/dark.css" />
+<link rel="stylesheet" href="https://yinminghao.top/fontawesome/css/all.min.css" />
+
+<script src="https://yinminghao.top/js/bundle.js"></script>
+<script src="https://yinminghao.top/js/instantpage.js" type="module" defer></script>
+<meta name="generator" content="Hugo 0.74.3" />
+  </head>
+  <body>
+    
+  
+
+
+
+
+  <header>
+    <nav class="navbar">
+  <div class="nav">
+    
+      <a href="https://yinminghao.top/" class="nav-logo">
+      <img src="https://yinminghao.top/images/icon.png"
+           width="50"
+           height="50"
+           alt="Logo">
+      </a>
+    
+
+    <ul class="nav-links">
+      
+        
+          <li><a href="/about/" name="About"><i class="fas fa-user fa-lg"></i></a></li>
+        
+      
+        
+          <li><a href="/tags" name="Tags"><i class="fas fa-tag fa-lg"></i></a></li>
+        
+      
+        
+          <li><a href="/categories" name="Category"><i class="fas fa-folder-open fa-lg"></i></a></li>
+        
+      
+        
+          <li><a href="/search" name="Search"><i class="fas fa-search fa-lg"></i></a></li>
+        
+      
+        
+          <li><a href="/archives" name="Archives"><i class="fas fa-archive fa-lg"></i></a></li>
+        
+      
+    </ul>
+  </div>
+</nav>
+
+    <div class="intro-header">
+      <div class="container">
+        <div class="post-heading">
+          
+            <h1>Fabric网络源码分析</h1>
+          
+          
+            <span class="meta-post">
+  <i class="fa fa-calendar-alt"></i>&nbsp;Aug 3, 2020
+  
+</span>
+
+          
+        </div>
+      </div>
+    </div>
+  </header>
+
+
+    
+  <div class="container" role="main">
+    <article class="article" class="blog-post">
+      
+    <p><strong>本系列为对 fabric <a href="https://github.com/hyperledger/fabric/tree/release-2.1">release-2.1</a> 版本代码阅读的记录，如有不当之处，烦请指正</strong></p>
+<blockquote>
+<p>本文对 fabric 的网络层代码进行分析，介绍其基本思想与代码实现，包括组网、身份验证与广播实现等，</p>
+</blockquote>
+<h2 id="fabric-网络介绍">fabric 网络介绍</h2>
+<p>在之前的对 fabric 的介绍中，可以了解到 fabric 将交易(事务)执行、排序、验证进行分离，在这种设计下，我们可以对这些模块单独进行缩放。</p>
+<p>与其他两个阶段点对点传播消息不同，排序阶段会对收到的交易(事务)进行共识排序，并将其分发到网络中的各个阶段，因此对网络层有更高的要求。</p>
+<blockquote>
+<p>大多数共识算法(例如CFT、BFT)都受带宽限制(笔者之前从事基于algorand共识的公链开发时也遇到了网络瓶颈, 在网络流量、延迟等方面做了大量工作)，fabric 的排序共识(raft)也同样共识受到其节点网络容量的限制。无法通过添加更多共识节点来提高吞吐量，相反节点的增多会影响共识的性能。</p>
+</blockquote>
+<p><strong>fabric 采用 gossip 实现消息的广播。</strong></p>
+<h3 id="gossip-组件">gossip 组件</h3>
+<p>区块通过 gossip 组件将排序服务签名后的区块广播到网络中其他节点，其他节点收到区块后验完整性组装成区块链。</p>
+<p>fabric 的通信层基于gRPC，并利用具有相互身份验证的TLS来保证消息的权限，gossip 组件维护系统中在线节点的成员认证关系并随时对其进行更新。</p>
+<h3 id="gossip-作用与实现方式">gossip 作用与实现方式</h3>
+<ol>
+<li>gossip 采用 pull-push 协议在节点见之间可靠地分发消息。</li>
+<li>为了减轻从排序节点向网络发送数据块的负担，fabric 会选择一个领导节点，该节点代表它们从排序服务中获取数据块并使用 gossip 进行分发。</li>
+<li>在新节点加入或节点长时间断开连接时，gossip 负责这些节点的状态更新，也就是通常理解的<strong>同步</strong>作用</li>
+</ol>
+<h2 id="代码实现">代码实现</h2>
+<p>fabric 的网络层基本在 gossip 包里实现</p>
+<pre><code>- gossip
+    - api
+    - comm
+    - common
+    - discovery
+    - election
+    - filter
+    - gossip
+    - identity
+    - metrics 
+    - privdata
+    - protoext
+    - service
+    - state
+    - util
+</code></pre><h3 id="组网">组网</h3>
+<p>一个节点要加入网络，必须要知道一个已知的 Fabric 节点作为启动节点。 可以通过配置文件(配置文件)设置想要连接的节点</p>
+<pre><code>&lt;core.yaml&gt;
+# Gossip related configuration
+gossip:
+    # Bootstrap set to initialize gossip with
+    bootstrap: 127.0.0.1:7051
+</code></pre><p>节点启动创建用于广播的服务 <code>initGossipService()</code>,  除了一些常见的监听端口操作外， 会调用<code>connect2BootstrapPeers</code> 与配置文件定义的节点相连</p>
+<div class="highlight"><pre style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4"><code class="language-golang" data-lang="golang"><span style="color:#75715e">// 保留主要逻辑
+</span><span style="color:#75715e"></span><span style="color:#66d9ef">func</span> (<span style="color:#a6e22e">g</span> <span style="color:#f92672">*</span><span style="color:#a6e22e">Node</span>) <span style="color:#a6e22e">connect2BootstrapPeers</span>() {
+	<span style="color:#66d9ef">for</span> <span style="color:#a6e22e">_</span>, <span style="color:#a6e22e">endpoint</span> <span style="color:#f92672">:=</span> <span style="color:#66d9ef">range</span> <span style="color:#a6e22e">g</span>.<span style="color:#a6e22e">conf</span>.<span style="color:#a6e22e">BootstrapPeers</span> {
+        <span style="color:#75715e">// 用于标记节点，声明 pk
+</span><span style="color:#75715e"></span>		<span style="color:#a6e22e">identifier</span> <span style="color:#f92672">:=</span> <span style="color:#66d9ef">func</span>() (<span style="color:#f92672">*</span><span style="color:#a6e22e">discovery</span>.<span style="color:#a6e22e">PeerIdentification</span>, <span style="color:#66d9ef">error</span>) {
+			<span style="color:#f92672">...</span>
+		}
+		<span style="color:#a6e22e">g</span>.<span style="color:#a6e22e">disc</span>.<span style="color:#a6e22e">Connect</span>(<span style="color:#a6e22e">discovery</span>.<span style="color:#a6e22e">NetworkMember</span>{
+			<span style="color:#a6e22e">InternalEndpoint</span>: <span style="color:#a6e22e">endpoint</span>,
+			<span style="color:#a6e22e">Endpoint</span>:         <span style="color:#a6e22e">endpoint</span>,
+		}, <span style="color:#a6e22e">identifier</span>)
+	}
+}
+
+<span style="color:#66d9ef">func</span> (<span style="color:#a6e22e">d</span> <span style="color:#f92672">*</span><span style="color:#a6e22e">gossipDiscoveryImpl</span>) <span style="color:#a6e22e">Connect</span>(<span style="color:#a6e22e">member</span> <span style="color:#a6e22e">NetworkMember</span>, <span style="color:#a6e22e">id</span> <span style="color:#a6e22e">identifier</span>) {
+	<span style="color:#66d9ef">go</span> <span style="color:#66d9ef">func</span>() {
+		<span style="color:#66d9ef">for</span> <span style="color:#a6e22e">i</span> <span style="color:#f92672">:=</span> <span style="color:#ae81ff">0</span>; <span style="color:#a6e22e">i</span> &lt; <span style="color:#a6e22e">d</span>.<span style="color:#a6e22e">maxConnectionAttempts</span> <span style="color:#f92672">&amp;&amp;</span> !<span style="color:#a6e22e">d</span>.<span style="color:#a6e22e">toDie</span>(); <span style="color:#a6e22e">i</span><span style="color:#f92672">++</span> {
+            <span style="color:#f92672">...</span>
+			<span style="color:#a6e22e">peer</span> <span style="color:#f92672">:=</span> <span style="color:#f92672">&amp;</span><span style="color:#a6e22e">NetworkMember</span>{
+				<span style="color:#a6e22e">InternalEndpoint</span>: <span style="color:#a6e22e">member</span>.<span style="color:#a6e22e">InternalEndpoint</span>,
+				<span style="color:#a6e22e">Endpoint</span>:         <span style="color:#a6e22e">member</span>.<span style="color:#a6e22e">Endpoint</span>,
+				<span style="color:#a6e22e">PKIid</span>:            <span style="color:#a6e22e">id</span>.<span style="color:#a6e22e">ID</span>,
+            }
+            <span style="color:#75715e">// 创建 MembershipRequest, 用与向连接节点请求已知的节点，按道理来说需要发送自己的节点避免重复，但是这里fabric为了安全暂时没有实现，
+</span><span style="color:#75715e"></span>            <span style="color:#75715e">// See FAB-2570 for tracking this issue.
+</span><span style="color:#75715e"></span>			<span style="color:#a6e22e">m</span>, <span style="color:#a6e22e">err</span> <span style="color:#f92672">:=</span> <span style="color:#a6e22e">d</span>.<span style="color:#a6e22e">createMembershipRequest</span>(<span style="color:#a6e22e">id</span>.<span style="color:#a6e22e">SelfOrg</span>)
+			<span style="color:#f92672">...</span>
+            <span style="color:#75715e">// nil 签名
+</span><span style="color:#75715e"></span>            <span style="color:#f92672">...</span>
+
+            <span style="color:#75715e">// 发送 MembershipRequest
+</span><span style="color:#75715e"></span>			<span style="color:#66d9ef">go</span> <span style="color:#a6e22e">d</span>.<span style="color:#a6e22e">sendUntilAcked</span>(<span style="color:#a6e22e">peer</span>, <span style="color:#a6e22e">req</span>)
+			<span style="color:#66d9ef">return</span>
+		}
+	}()
+}
+
+<span style="color:#75715e">// &lt;------------------- server peer handle logic start -------------------&gt;
+</span><span style="color:#75715e">// 每个节点在初始化 DiscoveryService(节点发现服务) 的时候会开启一个 handleMessages 的 goroutine, 对连接层消息进行处理, 这里也有周期性测活、周期性断线重连逻辑， 也会周期性的发送心跳包（alive message更新 alive 时间）
+</span><span style="color:#75715e">// 对于 MembershipRequest 的接收方，会对收到的消息进行响应
+</span><span style="color:#75715e"></span>
+<span style="color:#66d9ef">func</span> (<span style="color:#a6e22e">d</span> <span style="color:#f92672">*</span><span style="color:#a6e22e">gossipDiscoveryImpl</span>) <span style="color:#a6e22e">handleMsgFromComm</span>(<span style="color:#a6e22e">msg</span> <span style="color:#a6e22e">protoext</span>.<span style="color:#a6e22e">ReceivedMessage</span>) {
+    <span style="color:#f92672">...</span>
+    <span style="color:#75715e">// 判断是否为 MembershipRequest 消息
+</span><span style="color:#75715e"></span>	<span style="color:#66d9ef">if</span> <span style="color:#a6e22e">memReq</span> <span style="color:#f92672">:=</span> <span style="color:#a6e22e">m</span>.<span style="color:#a6e22e">GetMemReq</span>(); <span style="color:#a6e22e">memReq</span> <span style="color:#f92672">!=</span> <span style="color:#66d9ef">nil</span> {
+		<span style="color:#a6e22e">selfInfoGossipMsg</span>, <span style="color:#a6e22e">err</span> <span style="color:#f92672">:=</span> <span style="color:#a6e22e">protoext</span>.<span style="color:#a6e22e">EnvelopeToGossipMessage</span>(<span style="color:#a6e22e">memReq</span>.<span style="color:#a6e22e">SelfInformation</span>)
+        <span style="color:#f92672">...</span>
+        <span style="color:#75715e">// 合法性校验等
+</span><span style="color:#75715e"></span>        <span style="color:#f92672">...</span>
+        
+        <span style="color:#75715e">// 将自身感知到的网络节点发送给请求方, 包括 alive 节点与 dead 节点
+</span><span style="color:#75715e"></span>		<span style="color:#66d9ef">go</span> <span style="color:#a6e22e">d</span>.<span style="color:#a6e22e">sendMemResponse</span>(<span style="color:#a6e22e">selfInfoGossipMsg</span>.<span style="color:#a6e22e">GetAliveMsg</span>().<span style="color:#a6e22e">Membership</span>, <span style="color:#a6e22e">internalEndpoint</span>, <span style="color:#a6e22e">m</span>.<span style="color:#a6e22e">Nonce</span>)
+		<span style="color:#66d9ef">return</span>
+    }
+}   
+<span style="color:#75715e">// &lt;------------------- server peer handle logic end -------------------&gt;
+</span><span style="color:#75715e"></span>
+
+<span style="color:#75715e">// 同样在 handleMessages 逻辑里，也有对 MembershipResponse 消息的处理逻辑
+</span><span style="color:#75715e"></span><span style="color:#66d9ef">func</span> (<span style="color:#a6e22e">d</span> <span style="color:#f92672">*</span><span style="color:#a6e22e">gossipDiscoveryImpl</span>) <span style="color:#a6e22e">handleMsgFromComm</span>(<span style="color:#a6e22e">msg</span> <span style="color:#a6e22e">protoext</span>.<span style="color:#a6e22e">ReceivedMessage</span>) {
+    <span style="color:#f92672">...</span>
+    <span style="color:#75715e">// 判断是否为 MembershipResponse 消息
+</span><span style="color:#75715e"></span>	<span style="color:#66d9ef">if</span> <span style="color:#a6e22e">memResp</span> <span style="color:#f92672">:=</span> <span style="color:#a6e22e">m</span>.<span style="color:#a6e22e">GetMemRes</span>(); <span style="color:#a6e22e">memResp</span> <span style="color:#f92672">!=</span> <span style="color:#66d9ef">nil</span> {
+		<span style="color:#66d9ef">for</span> <span style="color:#a6e22e">_</span>, <span style="color:#a6e22e">env</span> <span style="color:#f92672">:=</span> <span style="color:#66d9ef">range</span> <span style="color:#a6e22e">memResp</span>.<span style="color:#a6e22e">Alive</span> {
+			<span style="color:#a6e22e">am</span>, <span style="color:#a6e22e">err</span> <span style="color:#f92672">:=</span> <span style="color:#a6e22e">protoext</span>.<span style="color:#a6e22e">EnvelopeToGossipMessage</span>(<span style="color:#a6e22e">env</span>)
+			
+			<span style="color:#66d9ef">if</span> <span style="color:#a6e22e">d</span>.<span style="color:#a6e22e">msgStore</span>.<span style="color:#a6e22e">CheckValid</span>(<span style="color:#a6e22e">am</span>) <span style="color:#f92672">&amp;&amp;</span> <span style="color:#a6e22e">d</span>.<span style="color:#a6e22e">crypt</span>.<span style="color:#a6e22e">ValidateAliveMsg</span>(<span style="color:#a6e22e">am</span>) {
+                <span style="color:#75715e">// 处理 alive peer, 根据 am 时间戳更新 id2Member(map, 可以理解为通讯录)
+</span><span style="color:#75715e"></span>                <span style="color:#75715e">//  1. 若之前不存在，更新
+</span><span style="color:#75715e"></span>                <span style="color:#75715e">//       - learnNewMembers， 记录该节点信息到 aliveLastTS、deadLastTS、id2Member等
+</span><span style="color:#75715e"></span>                <span style="color:#75715e">//  2. 若之前存在，根据是否失活与本地连接时间戳对比进行决定是否更新
+</span><span style="color:#75715e"></span>				<span style="color:#a6e22e">d</span>.<span style="color:#a6e22e">handleAliveMessage</span>(<span style="color:#a6e22e">am</span>)
+			}
+		}
+
+		<span style="color:#66d9ef">for</span> <span style="color:#a6e22e">_</span>, <span style="color:#a6e22e">env</span> <span style="color:#f92672">:=</span> <span style="color:#66d9ef">range</span> <span style="color:#a6e22e">memResp</span>.<span style="color:#a6e22e">Dead</span> {
+			<span style="color:#a6e22e">dm</span>, <span style="color:#a6e22e">err</span> <span style="color:#f92672">:=</span> <span style="color:#a6e22e">protoext</span>.<span style="color:#a6e22e">EnvelopeToGossipMessage</span>(<span style="color:#a6e22e">env</span>)
+			<span style="color:#75715e">// Newer alive message exists or the message isn&#39;t authentic
+</span><span style="color:#75715e"></span>			<span style="color:#66d9ef">if</span> !<span style="color:#a6e22e">d</span>.<span style="color:#a6e22e">msgStore</span>.<span style="color:#a6e22e">CheckValid</span>(<span style="color:#a6e22e">dm</span>) <span style="color:#f92672">||</span> !<span style="color:#a6e22e">d</span>.<span style="color:#a6e22e">crypt</span>.<span style="color:#a6e22e">ValidateAliveMsg</span>(<span style="color:#a6e22e">dm</span>) {
+				<span style="color:#66d9ef">continue</span>
+			}
+			<span style="color:#a6e22e">newDeadMembers</span> <span style="color:#f92672">:=</span> []<span style="color:#f92672">*</span><span style="color:#a6e22e">protoext</span>.<span style="color:#a6e22e">SignedGossipMessage</span>{}
+			<span style="color:#a6e22e">d</span>.<span style="color:#a6e22e">lock</span>.<span style="color:#a6e22e">RLock</span>()
+			<span style="color:#66d9ef">if</span> <span style="color:#a6e22e">_</span>, <span style="color:#a6e22e">known</span> <span style="color:#f92672">:=</span> <span style="color:#a6e22e">d</span>.<span style="color:#a6e22e">id2Member</span>[string(<span style="color:#a6e22e">dm</span>.<span style="color:#a6e22e">GetAliveMsg</span>().<span style="color:#a6e22e">Membership</span>.<span style="color:#a6e22e">PkiId</span>)]; !<span style="color:#a6e22e">known</span> {
+				<span style="color:#a6e22e">newDeadMembers</span> = append(<span style="color:#a6e22e">newDeadMembers</span>, <span style="color:#a6e22e">dm</span>)
+			}
+			<span style="color:#a6e22e">d</span>.<span style="color:#a6e22e">lock</span>.<span style="color:#a6e22e">RUnlock</span>()
+			<span style="color:#a6e22e">d</span>.<span style="color:#a6e22e">learnNewMembers</span>([]<span style="color:#f92672">*</span><span style="color:#a6e22e">protoext</span>.<span style="color:#a6e22e">SignedGossipMessage</span>{}, <span style="color:#a6e22e">newDeadMembers</span>)
+		}
+	}
+}
+</code></pre></div><p>此外，节点也会根据与 AnchorPeers 交换 membership 信息： 当节点加入channel时，会连接 anchor peer， 处理逻辑同connect （本质是transaction，系统合约调用/invoke） 。</p>
+<h3 id="节点件消息传播-gossip">节点件消息传播 (Gossip)</h3>
+<blockquote>
+<p>消息发送方式：</p>
+<ul>
+<li>点对点发送（end to end）</li>
+<li>gossip方式——发送消息时会根据消息类型对节点进行过滤筛选（另外还会去除掉发送节点）后再随机（具体实现上是随机就近原则）选择k个节点发送消息。这里采用的是push和pull方式。</li>
+</ul>
+</blockquote>
+<ol>
+<li>push
+节点有了新消息后，随机选择 k 个节点（例如，3），向它们发送新消息。k个节点收到后，继续随机选择k个节点发送新信息，直到所有节点都知道该新信息。</li>
+</ol>
+<div class="highlight"><pre style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4"><code class="language-golang" data-lang="golang"><span style="color:#75715e">// Gossip sends a message to other peers to the network
+</span><span style="color:#75715e"></span><span style="color:#66d9ef">func</span> (<span style="color:#a6e22e">g</span> <span style="color:#f92672">*</span><span style="color:#a6e22e">Node</span>) <span style="color:#a6e22e">Gossip</span>(<span style="color:#a6e22e">msg</span> <span style="color:#f92672">*</span><span style="color:#a6e22e">pg</span>.<span style="color:#a6e22e">GossipMessage</span>) {
+    <span style="color:#f92672">...</span>
+    <span style="color:#75715e">// 判断是否只在 channel 内转发
+</span><span style="color:#75715e"></span>	<span style="color:#66d9ef">if</span> <span style="color:#a6e22e">protoext</span>.<span style="color:#a6e22e">IsChannelRestricted</span>(<span style="color:#a6e22e">msg</span>) {
+		<span style="color:#a6e22e">gc</span> <span style="color:#f92672">:=</span> <span style="color:#a6e22e">g</span>.<span style="color:#a6e22e">chanState</span>.<span style="color:#a6e22e">getGossipChannelByChainID</span>(<span style="color:#a6e22e">msg</span>.<span style="color:#a6e22e">Channel</span>)
+		<span style="color:#66d9ef">if</span> <span style="color:#a6e22e">gc</span> <span style="color:#f92672">==</span> <span style="color:#66d9ef">nil</span> {
+			<span style="color:#a6e22e">g</span>.<span style="color:#a6e22e">logger</span>.<span style="color:#a6e22e">Warning</span>(<span style="color:#e6db74">&#34;Failed obtaining gossipChannel of&#34;</span>, <span style="color:#a6e22e">msg</span>.<span style="color:#a6e22e">Channel</span>, <span style="color:#e6db74">&#34;aborting&#34;</span>)
+			<span style="color:#66d9ef">return</span>
+		}
+		<span style="color:#66d9ef">if</span> <span style="color:#a6e22e">protoext</span>.<span style="color:#a6e22e">IsDataMsg</span>(<span style="color:#a6e22e">msg</span>) {
+			<span style="color:#a6e22e">gc</span>.<span style="color:#a6e22e">AddToMsgStore</span>(<span style="color:#a6e22e">sMsg</span>)
+		}
+	}
+    <span style="color:#f92672">...</span>
+    <span style="color:#75715e">// 将消息添加到batchingEmitter中，并定期(默认10ms)将它们分批转发 T 次，然后丢弃。 
+</span><span style="color:#75715e"></span>    <span style="color:#75715e">// 如果batchingEmitter的已存储消息计数达到/一定容量(默认是1)，则也会触发消息分发 =&gt; emit()
+</span><span style="color:#75715e"></span>	<span style="color:#a6e22e">g</span>.<span style="color:#a6e22e">emitter</span>.<span style="color:#a6e22e">Add</span>(<span style="color:#f92672">&amp;</span><span style="color:#a6e22e">emittedGossipMessage</span>{
+		<span style="color:#a6e22e">SignedGossipMessage</span>: <span style="color:#a6e22e">sMsg</span>,
+		<span style="color:#a6e22e">filter</span>: <span style="color:#66d9ef">func</span>(<span style="color:#a6e22e">_</span> <span style="color:#a6e22e">common</span>.<span style="color:#a6e22e">PKIidType</span>) <span style="color:#66d9ef">bool</span> {
+			<span style="color:#66d9ef">return</span> <span style="color:#66d9ef">true</span>
+		},
+	})
+}
+
+<span style="color:#66d9ef">func</span> (<span style="color:#a6e22e">p</span> <span style="color:#f92672">*</span><span style="color:#a6e22e">batchingEmitterImpl</span>) <span style="color:#a6e22e">emit</span>() {
+    <span style="color:#f92672">...</span>
+	<span style="color:#a6e22e">msgs2beEmitted</span> <span style="color:#f92672">:=</span> make([]<span style="color:#66d9ef">interface</span>{}, len(<span style="color:#a6e22e">p</span>.<span style="color:#a6e22e">buff</span>))
+	<span style="color:#66d9ef">for</span> <span style="color:#a6e22e">i</span>, <span style="color:#a6e22e">v</span> <span style="color:#f92672">:=</span> <span style="color:#66d9ef">range</span> <span style="color:#a6e22e">p</span>.<span style="color:#a6e22e">buff</span> {
+		<span style="color:#a6e22e">msgs2beEmitted</span>[<span style="color:#a6e22e">i</span>] = <span style="color:#a6e22e">v</span>.<span style="color:#a6e22e">data</span>
+	}
+
+    <span style="color:#75715e">// cb =&gt; gossipBatch
+</span><span style="color:#75715e"></span>	<span style="color:#a6e22e">p</span>.<span style="color:#a6e22e">cb</span>(<span style="color:#a6e22e">msgs2beEmitted</span>)
+	<span style="color:#a6e22e">p</span>.<span style="color:#a6e22e">decrementCounters</span>()
+}
+
+<span style="color:#75715e">// 根据消息的不同路由策略，将消息发送到同一 peer 组，提高效率.
+</span><span style="color:#75715e"></span><span style="color:#66d9ef">func</span> (<span style="color:#a6e22e">g</span> <span style="color:#f92672">*</span><span style="color:#a6e22e">Node</span>) <span style="color:#a6e22e">gossipBatch</span>(<span style="color:#a6e22e">msgs</span> []<span style="color:#f92672">*</span><span style="color:#a6e22e">emittedGossipMessage</span>) {
+    <span style="color:#f92672">...</span>
+	<span style="color:#66d9ef">var</span> <span style="color:#a6e22e">blocks</span> []<span style="color:#f92672">*</span><span style="color:#a6e22e">emittedGossipMessage</span>
+	<span style="color:#66d9ef">var</span> <span style="color:#a6e22e">stateInfoMsgs</span> []<span style="color:#f92672">*</span><span style="color:#a6e22e">emittedGossipMessage</span>
+	<span style="color:#66d9ef">var</span> <span style="color:#a6e22e">orgMsgs</span> []<span style="color:#f92672">*</span><span style="color:#a6e22e">emittedGossipMessage</span>
+	<span style="color:#66d9ef">var</span> <span style="color:#a6e22e">leadershipMsgs</span> []<span style="color:#f92672">*</span><span style="color:#a6e22e">emittedGossipMessage</span>
+
+    <span style="color:#75715e">// 区分不同类型的消息
+</span><span style="color:#75715e"></span>	<span style="color:#a6e22e">isABlock</span> <span style="color:#f92672">:=</span> <span style="color:#66d9ef">func</span>(<span style="color:#a6e22e">o</span> <span style="color:#66d9ef">interface</span>{}) <span style="color:#66d9ef">bool</span> {
+		<span style="color:#66d9ef">return</span> <span style="color:#a6e22e">protoext</span>.<span style="color:#a6e22e">IsDataMsg</span>(<span style="color:#a6e22e">o</span>.(<span style="color:#f92672">*</span><span style="color:#a6e22e">emittedGossipMessage</span>).<span style="color:#a6e22e">GossipMessage</span>)
+	}
+	<span style="color:#a6e22e">isAStateInfoMsg</span> <span style="color:#f92672">:=</span> <span style="color:#66d9ef">func</span>(<span style="color:#a6e22e">o</span> <span style="color:#66d9ef">interface</span>{}) <span style="color:#66d9ef">bool</span> {
+		<span style="color:#66d9ef">return</span> <span style="color:#a6e22e">protoext</span>.<span style="color:#a6e22e">IsStateInfoMsg</span>(<span style="color:#a6e22e">o</span>.(<span style="color:#f92672">*</span><span style="color:#a6e22e">emittedGossipMessage</span>).<span style="color:#a6e22e">GossipMessage</span>)
+	}
+	<span style="color:#a6e22e">aliveMsgsWithNoEndpointAndInOurOrg</span> <span style="color:#f92672">:=</span> <span style="color:#66d9ef">func</span>(<span style="color:#a6e22e">o</span> <span style="color:#66d9ef">interface</span>{}) <span style="color:#66d9ef">bool</span> {
+		<span style="color:#a6e22e">msg</span> <span style="color:#f92672">:=</span> <span style="color:#a6e22e">o</span>.(<span style="color:#f92672">*</span><span style="color:#a6e22e">emittedGossipMessage</span>)
+		<span style="color:#66d9ef">if</span> !<span style="color:#a6e22e">protoext</span>.<span style="color:#a6e22e">IsAliveMsg</span>(<span style="color:#a6e22e">msg</span>.<span style="color:#a6e22e">GossipMessage</span>) {
+			<span style="color:#66d9ef">return</span> <span style="color:#66d9ef">false</span>
+		}
+		<span style="color:#a6e22e">member</span> <span style="color:#f92672">:=</span> <span style="color:#a6e22e">msg</span>.<span style="color:#a6e22e">GetAliveMsg</span>().<span style="color:#a6e22e">Membership</span>
+		<span style="color:#66d9ef">return</span> <span style="color:#a6e22e">member</span>.<span style="color:#a6e22e">Endpoint</span> <span style="color:#f92672">==</span> <span style="color:#e6db74">&#34;&#34;</span> <span style="color:#f92672">&amp;&amp;</span> <span style="color:#a6e22e">g</span>.<span style="color:#a6e22e">IsInMyOrg</span>(<span style="color:#a6e22e">discovery</span>.<span style="color:#a6e22e">NetworkMember</span>{<span style="color:#a6e22e">PKIid</span>: <span style="color:#a6e22e">member</span>.<span style="color:#a6e22e">PkiId</span>})
+	}
+	<span style="color:#a6e22e">isOrgRestricted</span> <span style="color:#f92672">:=</span> <span style="color:#66d9ef">func</span>(<span style="color:#a6e22e">o</span> <span style="color:#66d9ef">interface</span>{}) <span style="color:#66d9ef">bool</span> {
+		<span style="color:#66d9ef">return</span> <span style="color:#a6e22e">aliveMsgsWithNoEndpointAndInOurOrg</span>(<span style="color:#a6e22e">o</span>) <span style="color:#f92672">||</span> <span style="color:#a6e22e">protoext</span>.<span style="color:#a6e22e">IsOrgRestricted</span>(<span style="color:#a6e22e">o</span>.(<span style="color:#f92672">*</span><span style="color:#a6e22e">emittedGossipMessage</span>).<span style="color:#a6e22e">GossipMessage</span>)
+	}
+	<span style="color:#a6e22e">isLeadershipMsg</span> <span style="color:#f92672">:=</span> <span style="color:#66d9ef">func</span>(<span style="color:#a6e22e">o</span> <span style="color:#66d9ef">interface</span>{}) <span style="color:#66d9ef">bool</span> {
+		<span style="color:#66d9ef">return</span> <span style="color:#a6e22e">protoext</span>.<span style="color:#a6e22e">IsLeadershipMsg</span>(<span style="color:#a6e22e">o</span>.(<span style="color:#f92672">*</span><span style="color:#a6e22e">emittedGossipMessage</span>).<span style="color:#a6e22e">GossipMessage</span>)
+	}
+
+	<span style="color:#75715e">// Gossip blocks
+</span><span style="color:#75715e"></span>    <span style="color:#a6e22e">blocks</span>, <span style="color:#a6e22e">msgs</span> = <span style="color:#a6e22e">partitionMessages</span>(<span style="color:#a6e22e">isABlock</span>, <span style="color:#a6e22e">msgs</span>)
+    
+    <span style="color:#75715e">// gossipInChan 目的就是获取消息所属的channel， 然后获取该channel的路由并发送出去。
+</span><span style="color:#75715e"></span>    <span style="color:#75715e">//  1. 获取节点的 Membership
+</span><span style="color:#75715e"></span>    <span style="color:#75715e">//  2. 根据消息类型选择发送到指定的节点
+</span><span style="color:#75715e"></span>    <span style="color:#75715e">//      2.1 IsLeadershipMsg =&gt; 发送给所有已知节点
+</span><span style="color:#75715e"></span>    <span style="color:#75715e">//      2.2 Other =&gt; 随机选 k 个节点发(默认是三个/rand.Perm)
+</span><span style="color:#75715e"></span>    <span style="color:#75715e">// 3. 过滤节点并发送 =&gt; g.comm.Send (grpc.stream.Send)
+</span><span style="color:#75715e"></span>	<span style="color:#a6e22e">g</span>.<span style="color:#a6e22e">gossipInChan</span>(<span style="color:#a6e22e">blocks</span>, <span style="color:#66d9ef">func</span>(<span style="color:#a6e22e">gc</span> <span style="color:#a6e22e">channel</span>.<span style="color:#a6e22e">GossipChannel</span>) <span style="color:#a6e22e">filter</span>.<span style="color:#a6e22e">RoutingFilter</span> {
+		<span style="color:#66d9ef">return</span> <span style="color:#a6e22e">filter</span>.<span style="color:#a6e22e">CombineRoutingFilters</span>(<span style="color:#a6e22e">gc</span>.<span style="color:#a6e22e">EligibleForChannel</span>, <span style="color:#a6e22e">gc</span>.<span style="color:#a6e22e">IsMemberInChan</span>, <span style="color:#a6e22e">g</span>.<span style="color:#a6e22e">IsInMyOrg</span>)
+	})
+
+	<span style="color:#75715e">// Gossip Leadership messages
+</span><span style="color:#75715e"></span>	<span style="color:#a6e22e">leadershipMsgs</span>, <span style="color:#a6e22e">msgs</span> = <span style="color:#a6e22e">partitionMessages</span>(<span style="color:#a6e22e">isLeadershipMsg</span>, <span style="color:#a6e22e">msgs</span>)
+	<span style="color:#a6e22e">g</span>.<span style="color:#a6e22e">gossipInChan</span>(<span style="color:#a6e22e">leadershipMsgs</span>, <span style="color:#66d9ef">func</span>(<span style="color:#a6e22e">gc</span> <span style="color:#a6e22e">channel</span>.<span style="color:#a6e22e">GossipChannel</span>) <span style="color:#a6e22e">filter</span>.<span style="color:#a6e22e">RoutingFilter</span> {
+		<span style="color:#66d9ef">return</span> <span style="color:#a6e22e">filter</span>.<span style="color:#a6e22e">CombineRoutingFilters</span>(<span style="color:#a6e22e">gc</span>.<span style="color:#a6e22e">EligibleForChannel</span>, <span style="color:#a6e22e">gc</span>.<span style="color:#a6e22e">IsMemberInChan</span>, <span style="color:#a6e22e">g</span>.<span style="color:#a6e22e">IsInMyOrg</span>)
+	})
+
+	<span style="color:#75715e">// Gossip StateInfo messages
+</span><span style="color:#75715e"></span>	<span style="color:#a6e22e">stateInfoMsgs</span>, <span style="color:#a6e22e">msgs</span> = <span style="color:#a6e22e">partitionMessages</span>(<span style="color:#a6e22e">isAStateInfoMsg</span>, <span style="color:#a6e22e">msgs</span>)
+	<span style="color:#66d9ef">for</span> <span style="color:#a6e22e">_</span>, <span style="color:#a6e22e">stateInfMsg</span> <span style="color:#f92672">:=</span> <span style="color:#66d9ef">range</span> <span style="color:#a6e22e">stateInfoMsgs</span> {
+		<span style="color:#a6e22e">peerSelector</span> <span style="color:#f92672">:=</span> <span style="color:#a6e22e">g</span>.<span style="color:#a6e22e">IsInMyOrg</span>
+		<span style="color:#a6e22e">gc</span> <span style="color:#f92672">:=</span> <span style="color:#a6e22e">g</span>.<span style="color:#a6e22e">chanState</span>.<span style="color:#a6e22e">lookupChannelForGossipMsg</span>(<span style="color:#a6e22e">stateInfMsg</span>.<span style="color:#a6e22e">GossipMessage</span>)
+		<span style="color:#66d9ef">if</span> <span style="color:#a6e22e">gc</span> <span style="color:#f92672">!=</span> <span style="color:#66d9ef">nil</span> <span style="color:#f92672">&amp;&amp;</span> <span style="color:#a6e22e">g</span>.<span style="color:#a6e22e">hasExternalEndpoint</span>(<span style="color:#a6e22e">stateInfMsg</span>.<span style="color:#a6e22e">GossipMessage</span>.<span style="color:#a6e22e">GetStateInfo</span>().<span style="color:#a6e22e">PkiId</span>) {
+			<span style="color:#a6e22e">peerSelector</span> = <span style="color:#a6e22e">gc</span>.<span style="color:#a6e22e">IsMemberInChan</span>
+		}
+
+		<span style="color:#a6e22e">peerSelector</span> = <span style="color:#a6e22e">filter</span>.<span style="color:#a6e22e">CombineRoutingFilters</span>(<span style="color:#a6e22e">peerSelector</span>, <span style="color:#66d9ef">func</span>(<span style="color:#a6e22e">member</span> <span style="color:#a6e22e">discovery</span>.<span style="color:#a6e22e">NetworkMember</span>) <span style="color:#66d9ef">bool</span> {
+			<span style="color:#66d9ef">return</span> <span style="color:#a6e22e">stateInfMsg</span>.<span style="color:#a6e22e">filter</span>(<span style="color:#a6e22e">member</span>.<span style="color:#a6e22e">PKIid</span>)
+		})
+
+		<span style="color:#a6e22e">peers2Send</span> <span style="color:#f92672">:=</span> <span style="color:#a6e22e">filter</span>.<span style="color:#a6e22e">SelectPeers</span>(<span style="color:#a6e22e">g</span>.<span style="color:#a6e22e">conf</span>.<span style="color:#a6e22e">PropagatePeerNum</span>, <span style="color:#a6e22e">g</span>.<span style="color:#a6e22e">disc</span>.<span style="color:#a6e22e">GetMembership</span>(), <span style="color:#a6e22e">peerSelector</span>)
+		<span style="color:#a6e22e">g</span>.<span style="color:#a6e22e">comm</span>.<span style="color:#a6e22e">Send</span>(<span style="color:#a6e22e">stateInfMsg</span>.<span style="color:#a6e22e">SignedGossipMessage</span>, <span style="color:#a6e22e">peers2Send</span><span style="color:#f92672">...</span>)
+	}
+
+	<span style="color:#75715e">// Gossip messages restricted to our org
+</span><span style="color:#75715e"></span>	<span style="color:#a6e22e">orgMsgs</span>, <span style="color:#a6e22e">msgs</span> = <span style="color:#a6e22e">partitionMessages</span>(<span style="color:#a6e22e">isOrgRestricted</span>, <span style="color:#a6e22e">msgs</span>)
+	<span style="color:#a6e22e">peers2Send</span> <span style="color:#f92672">:=</span> <span style="color:#a6e22e">filter</span>.<span style="color:#a6e22e">SelectPeers</span>(<span style="color:#a6e22e">g</span>.<span style="color:#a6e22e">conf</span>.<span style="color:#a6e22e">PropagatePeerNum</span>, <span style="color:#a6e22e">g</span>.<span style="color:#a6e22e">disc</span>.<span style="color:#a6e22e">GetMembership</span>(), <span style="color:#a6e22e">g</span>.<span style="color:#a6e22e">IsInMyOrg</span>)
+	<span style="color:#66d9ef">for</span> <span style="color:#a6e22e">_</span>, <span style="color:#a6e22e">msg</span> <span style="color:#f92672">:=</span> <span style="color:#66d9ef">range</span> <span style="color:#a6e22e">orgMsgs</span> {
+		<span style="color:#a6e22e">g</span>.<span style="color:#a6e22e">comm</span>.<span style="color:#a6e22e">Send</span>(<span style="color:#a6e22e">msg</span>.<span style="color:#a6e22e">SignedGossipMessage</span>, <span style="color:#a6e22e">g</span>.<span style="color:#a6e22e">removeSelfLoop</span>(<span style="color:#a6e22e">msg</span>, <span style="color:#a6e22e">peers2Send</span>)<span style="color:#f92672">...</span>)
+	}
+
+	<span style="color:#75715e">// Finally, gossip the remaining messages
+</span><span style="color:#75715e"></span>	<span style="color:#66d9ef">for</span> <span style="color:#a6e22e">_</span>, <span style="color:#a6e22e">msg</span> <span style="color:#f92672">:=</span> <span style="color:#66d9ef">range</span> <span style="color:#a6e22e">msgs</span> {
+		<span style="color:#66d9ef">if</span> !<span style="color:#a6e22e">protoext</span>.<span style="color:#a6e22e">IsAliveMsg</span>(<span style="color:#a6e22e">msg</span>.<span style="color:#a6e22e">GossipMessage</span>) {
+			<span style="color:#a6e22e">g</span>.<span style="color:#a6e22e">logger</span>.<span style="color:#a6e22e">Error</span>(<span style="color:#e6db74">&#34;Unknown message type&#34;</span>, <span style="color:#a6e22e">msg</span>)
+			<span style="color:#66d9ef">continue</span>
+		}
+		<span style="color:#a6e22e">selectByOriginOrg</span> <span style="color:#f92672">:=</span> <span style="color:#a6e22e">g</span>.<span style="color:#a6e22e">peersByOriginOrgPolicy</span>(<span style="color:#a6e22e">discovery</span>.<span style="color:#a6e22e">NetworkMember</span>{<span style="color:#a6e22e">PKIid</span>: <span style="color:#a6e22e">msg</span>.<span style="color:#a6e22e">GetAliveMsg</span>().<span style="color:#a6e22e">Membership</span>.<span style="color:#a6e22e">PkiId</span>})
+		<span style="color:#a6e22e">selector</span> <span style="color:#f92672">:=</span> <span style="color:#a6e22e">filter</span>.<span style="color:#a6e22e">CombineRoutingFilters</span>(<span style="color:#a6e22e">selectByOriginOrg</span>, <span style="color:#66d9ef">func</span>(<span style="color:#a6e22e">member</span> <span style="color:#a6e22e">discovery</span>.<span style="color:#a6e22e">NetworkMember</span>) <span style="color:#66d9ef">bool</span> {
+			<span style="color:#66d9ef">return</span> <span style="color:#a6e22e">msg</span>.<span style="color:#a6e22e">filter</span>(<span style="color:#a6e22e">member</span>.<span style="color:#a6e22e">PKIid</span>)
+		})
+		<span style="color:#a6e22e">peers2Send</span> <span style="color:#f92672">:=</span> <span style="color:#a6e22e">filter</span>.<span style="color:#a6e22e">SelectPeers</span>(<span style="color:#a6e22e">g</span>.<span style="color:#a6e22e">conf</span>.<span style="color:#a6e22e">PropagatePeerNum</span>, <span style="color:#a6e22e">g</span>.<span style="color:#a6e22e">disc</span>.<span style="color:#a6e22e">GetMembership</span>(), <span style="color:#a6e22e">selector</span>)
+		<span style="color:#a6e22e">g</span>.<span style="color:#a6e22e">sendAndFilterSecrets</span>(<span style="color:#a6e22e">msg</span>.<span style="color:#a6e22e">SignedGossipMessage</span>, <span style="color:#a6e22e">peers2Send</span><span style="color:#f92672">...</span>)
+	}
+}
+
+<span style="color:#75715e">// 转发Forward
+</span><span style="color:#75715e">// 节点在 GossipServer 启动的时候会调用 acceptMessages 用于消息的处理(向消息pub 注册一个包含过滤规则的sub, 从网络中获取各个节点发来的消息), 最终调用 channel.handleMessage
+</span><span style="color:#75715e"></span><span style="color:#66d9ef">func</span> (<span style="color:#a6e22e">g</span> <span style="color:#f92672">*</span><span style="color:#a6e22e">Node</span>) <span style="color:#a6e22e">handleMessage</span>(<span style="color:#a6e22e">m</span> <span style="color:#a6e22e">protoext</span>.<span style="color:#a6e22e">ReceivedMessage</span>) {
+    <span style="color:#f92672">...</span>
+	<span style="color:#a6e22e">msg</span> <span style="color:#f92672">:=</span> <span style="color:#a6e22e">m</span>.<span style="color:#a6e22e">GetGossipMessage</span>()
+	<span style="color:#66d9ef">if</span> !<span style="color:#a6e22e">g</span>.<span style="color:#a6e22e">validateMsg</span>(<span style="color:#a6e22e">m</span>) {
+		<span style="color:#a6e22e">g</span>.<span style="color:#a6e22e">logger</span>.<span style="color:#a6e22e">Warning</span>(<span style="color:#e6db74">&#34;Message&#34;</span>, <span style="color:#a6e22e">msg</span>, <span style="color:#e6db74">&#34;isn&#39;t valid&#34;</span>)
+		<span style="color:#66d9ef">return</span>
+	}
+
+	<span style="color:#66d9ef">if</span> <span style="color:#a6e22e">protoext</span>.<span style="color:#a6e22e">IsChannelRestricted</span>(<span style="color:#a6e22e">msg</span>.<span style="color:#a6e22e">GossipMessage</span>) {
+        <span style="color:#75715e">// 判断 channel 是否匹配
+</span><span style="color:#75715e"></span>		} <span style="color:#66d9ef">else</span> {
+			<span style="color:#66d9ef">if</span> <span style="color:#a6e22e">protoext</span>.<span style="color:#a6e22e">IsLeadershipMsg</span>(<span style="color:#a6e22e">m</span>.<span style="color:#a6e22e">GetGossipMessage</span>().<span style="color:#a6e22e">GossipMessage</span>) {
+				<span style="color:#75715e">// LeadershipMsg 合法性校验
+</span><span style="color:#75715e"></span>				}
+            }
+            <span style="color:#75715e">// 处理 channel message
+</span><span style="color:#75715e"></span>			<span style="color:#a6e22e">gc</span>.<span style="color:#a6e22e">HandleMessage</span>(<span style="color:#a6e22e">m</span>)
+		}
+		<span style="color:#66d9ef">return</span>
+	}
+
+	<span style="color:#66d9ef">if</span> <span style="color:#a6e22e">selectOnlyDiscoveryMessages</span>(<span style="color:#a6e22e">m</span>) {
+        <span style="color:#75715e">// 连接相关的消息，合法性判断后转交给 discoverServer 处理，处理逻辑见上文
+</span><span style="color:#75715e"></span>		<span style="color:#a6e22e">g</span>.<span style="color:#a6e22e">forwardDiscoveryMsg</span>(<span style="color:#a6e22e">m</span>)
+	}
+
+    <span style="color:#75715e">// 处理 pull 消息，稍后分析
+</span><span style="color:#75715e"></span>	<span style="color:#66d9ef">if</span> <span style="color:#a6e22e">protoext</span>.<span style="color:#a6e22e">IsPullMsg</span>(<span style="color:#a6e22e">msg</span>.<span style="color:#a6e22e">GossipMessage</span>) <span style="color:#f92672">&amp;&amp;</span> <span style="color:#a6e22e">protoext</span>.<span style="color:#a6e22e">GetPullMsgType</span>(<span style="color:#a6e22e">msg</span>.<span style="color:#a6e22e">GossipMessage</span>) <span style="color:#f92672">==</span> <span style="color:#a6e22e">pg</span>.<span style="color:#a6e22e">PullMsgType_IDENTITY_MSG</span> {
+		<span style="color:#a6e22e">g</span>.<span style="color:#a6e22e">certStore</span>.<span style="color:#a6e22e">handleMessage</span>(<span style="color:#a6e22e">m</span>)
+	}
+}
+
+<span style="color:#75715e">// HandleMessage processes a message sent by a remote peer, 也会存储收到供之后使用
+</span><span style="color:#75715e"></span><span style="color:#66d9ef">func</span> (<span style="color:#a6e22e">gc</span> <span style="color:#f92672">*</span><span style="color:#a6e22e">gossipChannel</span>) <span style="color:#a6e22e">HandleMessage</span>(<span style="color:#a6e22e">msg</span> <span style="color:#a6e22e">protoext</span>.<span style="color:#a6e22e">ReceivedMessage</span>) {
+    <span style="color:#f92672">...</span>
+    <span style="color:#75715e">// 各种检验，org id， channel id， org in channel
+</span><span style="color:#75715e"></span>    <span style="color:#f92672">...</span>
+    <span style="color:#75715e">// 处理 Pull 逻辑，稍后分析 
+</span><span style="color:#75715e"></span>    <span style="color:#f92672">...</span>
+	<span style="color:#66d9ef">if</span> <span style="color:#a6e22e">protoext</span>.<span style="color:#a6e22e">IsDataMsg</span>(<span style="color:#a6e22e">m</span>.<span style="color:#a6e22e">GossipMessage</span>) <span style="color:#f92672">||</span> <span style="color:#a6e22e">protoext</span>.<span style="color:#a6e22e">IsStateInfoMsg</span>(<span style="color:#a6e22e">m</span>.<span style="color:#a6e22e">GossipMessage</span>) {
+		<span style="color:#a6e22e">added</span> <span style="color:#f92672">:=</span> <span style="color:#66d9ef">false</span>
+		<span style="color:#66d9ef">if</span> <span style="color:#a6e22e">protoext</span>.<span style="color:#a6e22e">IsDataMsg</span>(<span style="color:#a6e22e">m</span>.<span style="color:#a6e22e">GossipMessage</span>) {
+			<span style="color:#f92672">...</span>
+            <span style="color:#75715e">// 合法性验证
+</span><span style="color:#75715e"></span>            <span style="color:#f92672">...</span>
+			<span style="color:#a6e22e">gc</span>.<span style="color:#a6e22e">Lock</span>()
+			<span style="color:#a6e22e">added</span> = <span style="color:#a6e22e">gc</span>.<span style="color:#a6e22e">blockMsgStore</span>.<span style="color:#a6e22e">Add</span>(<span style="color:#a6e22e">msg</span>.<span style="color:#a6e22e">GetGossipMessage</span>())
+			<span style="color:#66d9ef">if</span> <span style="color:#a6e22e">added</span> {
+				<span style="color:#a6e22e">gc</span>.<span style="color:#a6e22e">logger</span>.<span style="color:#a6e22e">Debugf</span>(<span style="color:#e6db74">&#34;Adding %v to the block puller&#34;</span>, <span style="color:#a6e22e">msg</span>.<span style="color:#a6e22e">GetGossipMessage</span>())
+				<span style="color:#a6e22e">gc</span>.<span style="color:#a6e22e">blocksPuller</span>.<span style="color:#a6e22e">Add</span>(<span style="color:#a6e22e">msg</span>.<span style="color:#a6e22e">GetGossipMessage</span>())
+			}
+			<span style="color:#a6e22e">gc</span>.<span style="color:#a6e22e">Unlock</span>()
+		} <span style="color:#66d9ef">else</span> { <span style="color:#75715e">// StateInfoMsg verification should be handled in a layer above
+</span><span style="color:#75715e"></span>			<span style="color:#75715e">//  since we don&#39;t have access to the id mapper here
+</span><span style="color:#75715e"></span>			<span style="color:#a6e22e">added</span> = <span style="color:#a6e22e">gc</span>.<span style="color:#a6e22e">stateInfoMsgStore</span>.<span style="color:#a6e22e">Add</span>(<span style="color:#a6e22e">msg</span>.<span style="color:#a6e22e">GetGossipMessage</span>())
+		}
+
+		<span style="color:#66d9ef">if</span> <span style="color:#a6e22e">added</span> {
+			<span style="color:#75715e">// 转发消息
+</span><span style="color:#75715e"></span>			<span style="color:#a6e22e">gc</span>.<span style="color:#a6e22e">Forward</span>(<span style="color:#a6e22e">msg</span>)
+			<span style="color:#75715e">// DeMultiplex to local subscribers
+</span><span style="color:#75715e"></span>			<span style="color:#a6e22e">gc</span>.<span style="color:#a6e22e">DeMultiplex</span>(<span style="color:#a6e22e">m</span>)
+		}
+		<span style="color:#66d9ef">return</span>
+	}
+
+    <span style="color:#f92672">...</span> 
+    <span style="color:#75715e">// 处理拉取到的 block
+</span><span style="color:#75715e"></span>    <span style="color:#f92672">...</span>
+    
+	<span style="color:#66d9ef">if</span> <span style="color:#a6e22e">protoext</span>.<span style="color:#a6e22e">IsLeadershipMsg</span>(<span style="color:#a6e22e">m</span>.<span style="color:#a6e22e">GossipMessage</span>) {
+		<span style="color:#75715e">// Handling leadership message
+</span><span style="color:#75715e"></span>		<span style="color:#a6e22e">added</span> <span style="color:#f92672">:=</span> <span style="color:#a6e22e">gc</span>.<span style="color:#a6e22e">leaderMsgStore</span>.<span style="color:#a6e22e">Add</span>(<span style="color:#a6e22e">m</span>)
+		<span style="color:#66d9ef">if</span> <span style="color:#a6e22e">added</span> {
+			<span style="color:#a6e22e">gc</span>.<span style="color:#a6e22e">DeMultiplex</span>(<span style="color:#a6e22e">m</span>)
+		}
+	}
+}
+
+</code></pre></div><ol start="2">
+<li>pull 所有节点周期性(默认4s)的随机选取 k 个（默认配置=3）个节点，向它们获取数据。Fabric中gossip协议pull操作如下：</li>
+</ol>
+<pre><code>    Other peer				   			                    Initiator
+	 O	    &lt;-------- Hello &lt;NONCE&gt; -------------------------       O
+	/|\	    --------- Digest &lt;[3,5,8, 10...], NONCE&gt; --------&gt;     /|\
+	 |	    &lt;-------- Request &lt;[3,8], NONCE&gt; -----------------      |
+    / \	    --------- Response &lt;[item3, item8], NONCE&gt;-------&gt;     / \
+</code></pre><h3 id="orderer-广播区块到全网">orderer 广播区块到全网</h3>
+<p>排序节点只需要将区块分发给每个组织中的 leader 节点，由组织的 leader 负责分发到其他节点</p>
+<div class="highlight"><pre style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4"><code class="language-golang" data-lang="golang"><span style="color:#960050;background-color:#1e0010">#</span> <span style="color:#a6e22e">节点在</span> <span style="color:#a6e22e">initGossipService</span>() <span style="color:#a6e22e">时会</span> <span style="color:#a6e22e">初始化</span> <span style="color:#a6e22e">deliveryFactor</span><span style="color:#960050;background-color:#1e0010">，</span><span style="color:#a6e22e">当节点加入channel时会通过</span> <span style="color:#a6e22e">deliveryFactor</span> <span style="color:#a6e22e">创建</span> <span style="color:#a6e22e">deliver</span> <span style="color:#a6e22e">client</span>
+<span style="color:#66d9ef">func</span> (<span style="color:#a6e22e">g</span> <span style="color:#f92672">*</span><span style="color:#a6e22e">GossipService</span>) <span style="color:#a6e22e">InitializeChannel</span>(<span style="color:#a6e22e">channelID</span> <span style="color:#66d9ef">string</span>, <span style="color:#a6e22e">ordererSource</span> <span style="color:#f92672">*</span><span style="color:#a6e22e">orderers</span>.<span style="color:#a6e22e">ConnectionSource</span>, <span style="color:#a6e22e">store</span> <span style="color:#f92672">*</span><span style="color:#a6e22e">transientstore</span>.<span style="color:#a6e22e">Store</span>, <span style="color:#a6e22e">support</span> <span style="color:#a6e22e">Support</span>) {
+	<span style="color:#f92672">...</span>
+	<span style="color:#75715e">// 没有 deliveryService， 创建与 ordererSource 相连的 deliver client
+</span><span style="color:#75715e"></span>	<span style="color:#66d9ef">if</span> <span style="color:#a6e22e">g</span>.<span style="color:#a6e22e">deliveryService</span>[<span style="color:#a6e22e">channelID</span>] <span style="color:#f92672">==</span> <span style="color:#66d9ef">nil</span> {
+		<span style="color:#a6e22e">g</span>.<span style="color:#a6e22e">deliveryService</span>[<span style="color:#a6e22e">channelID</span>] = <span style="color:#a6e22e">g</span>.<span style="color:#a6e22e">deliveryFactory</span>.<span style="color:#a6e22e">Service</span>(<span style="color:#a6e22e">g</span>, <span style="color:#a6e22e">ordererSource</span>, <span style="color:#a6e22e">g</span>.<span style="color:#a6e22e">mcs</span>, <span style="color:#a6e22e">g</span>.<span style="color:#a6e22e">serviceConfig</span>.<span style="color:#a6e22e">OrgLeader</span>)
+	}
+
+	<span style="color:#75715e">// Delivery service might be nil only if it was not able to get connected to the ordering service
+</span><span style="color:#75715e"></span>	<span style="color:#66d9ef">if</span> <span style="color:#a6e22e">g</span>.<span style="color:#a6e22e">deliveryService</span>[<span style="color:#a6e22e">channelID</span>] <span style="color:#f92672">!=</span> <span style="color:#66d9ef">nil</span> {
+		<span style="color:#75715e">// 不能同时为 true
+</span><span style="color:#75715e"></span>		<span style="color:#75715e">// 默认 true ,动态选取leader算法
+</span><span style="color:#75715e"></span>		<span style="color:#a6e22e">leaderElection</span> <span style="color:#f92672">:=</span> <span style="color:#a6e22e">g</span>.<span style="color:#a6e22e">serviceConfig</span>.<span style="color:#a6e22e">UseLeaderElection</span>
+		<span style="color:#75715e">// 默认 false
+</span><span style="color:#75715e"></span>		<span style="color:#a6e22e">isStaticOrgLeader</span> <span style="color:#f92672">:=</span> <span style="color:#a6e22e">g</span>.<span style="color:#a6e22e">serviceConfig</span>.<span style="color:#a6e22e">OrgLeader</span>
+
+		<span style="color:#66d9ef">if</span> <span style="color:#a6e22e">leaderElection</span> {
+			<span style="color:#a6e22e">g</span>.<span style="color:#a6e22e">leaderElection</span>[<span style="color:#a6e22e">channelID</span>] = <span style="color:#a6e22e">g</span>.<span style="color:#a6e22e">newLeaderElectionComponent</span>(<span style="color:#a6e22e">channelID</span>, <span style="color:#a6e22e">g</span>.<span style="color:#a6e22e">onStatusChangeFactory</span>(<span style="color:#a6e22e">channelID</span>,
+				<span style="color:#a6e22e">support</span>.<span style="color:#a6e22e">Committer</span>), <span style="color:#a6e22e">g</span>.<span style="color:#a6e22e">metrics</span>.<span style="color:#a6e22e">ElectionMetrics</span>)
+		} <span style="color:#66d9ef">else</span> <span style="color:#66d9ef">if</span> <span style="color:#a6e22e">isStaticOrgLeader</span> {
+			<span style="color:#a6e22e">g</span>.<span style="color:#a6e22e">deliveryService</span>[<span style="color:#a6e22e">channelID</span>].<span style="color:#a6e22e">StartDeliverForChannel</span>(<span style="color:#a6e22e">channelID</span>, <span style="color:#a6e22e">support</span>.<span style="color:#a6e22e">Committer</span>, <span style="color:#66d9ef">func</span>() {})
+		} 
+		<span style="color:#f92672">...</span>
+}
+
+<span style="color:#75715e">// 开启 Deliver For Channel
+</span><span style="color:#75715e"></span><span style="color:#66d9ef">func</span> (<span style="color:#a6e22e">d</span> <span style="color:#f92672">*</span><span style="color:#a6e22e">deliverServiceImpl</span>) <span style="color:#a6e22e">StartDeliverForChannel</span>(<span style="color:#a6e22e">chainID</span> <span style="color:#66d9ef">string</span>, <span style="color:#a6e22e">ledgerInfo</span> <span style="color:#a6e22e">blocksprovider</span>.<span style="color:#a6e22e">LedgerInfo</span>, <span style="color:#a6e22e">finalizer</span> <span style="color:#66d9ef">func</span>()) <span style="color:#66d9ef">error</span> {
+	<span style="color:#f92672">...</span>
+	<span style="color:#a6e22e">dc</span> <span style="color:#f92672">:=</span> <span style="color:#f92672">&amp;</span><span style="color:#a6e22e">blocksprovider</span>.<span style="color:#a6e22e">Deliverer</span>{<span style="color:#f92672">...</span>}
+	<span style="color:#f92672">...</span>
+	<span style="color:#a6e22e">d</span>.<span style="color:#a6e22e">blockProviders</span>[<span style="color:#a6e22e">chainID</span>] = <span style="color:#a6e22e">dc</span>
+	<span style="color:#66d9ef">go</span> <span style="color:#66d9ef">func</span>() {
+		<span style="color:#75715e">// 查询本地账本，获取seekInfo，与orderer 创建 deliverClient 发送seekInfo， 获取resp, 一顿操作后提交到本地正本，然后将其分发(gossip)到其他peer
+</span><span style="color:#75715e"></span>		<span style="color:#a6e22e">dc</span>.<span style="color:#a6e22e">DeliverBlocks</span>()
+		<span style="color:#75715e">// Yield, 切换leader逻辑
+</span><span style="color:#75715e"></span>		<span style="color:#a6e22e">finalizer</span>()
+	}()
+	<span style="color:#66d9ef">return</span> <span style="color:#66d9ef">nil</span>
+}
+</code></pre></div>
+
+
+      
+        <div class="blog-tags">
+          
+            <a href="https://yinminghao.top//tags/fabric/">fabric</a>&nbsp;
+          
+        </div>
+      
+    </article>
+    
+    
+    <div id="disqus_thread"></div>
+    <script type="text/javascript">
+        (function() {
+            
+            
+            if (window.location.hostname == "localhost") return;
+
+            var dsq = document.createElement('script');
+            dsq.type = 'text/javascript';
+            dsq.async = true;
+            var disqus_shortname = 'yourdisqusshortname';
+            dsq.src = '//' + disqus_shortname + '.disqus.com/embed.js';
+            (document.getElementsByTagName('head')[0] || document.getElementsByTagName('body')[0]).appendChild(dsq);
+        })();
+    </script>
+    <noscript>Please enable JavaScript to view the <a href="https://disqus.com/?ref_noscript">comments powered by Disqus.</a></noscript>
+    <a href="https://disqus.com/" class="dsq-brlink">comments powered by <span class="logo-disqus">Disqus</span></a>
+
+  </div>
+
+    <footer>
+  <div class="container">
+    <p class="credits copyright">
+      <a href="https://yinminghao.top/about">Hugo Author</a>
+      &nbsp;&copy;
+      2020
+
+      
+        &nbsp;/&nbsp;
+        <a href="https://yinminghao.top/">Hugo Themes</a>
+      
+
+      &nbsp;&ndash;&nbsp;
+      <i class="fas fa-moon" id="dark-mode-toggle"></i>
+
+      <p class="credits theme-by">
+        Powered By <a href="https://gohugo.io">Hugo</a>&nbsp;Theme <a href="https://github.com/matsuyoshi30/harbor">Harbor</a>
+      </p>
+    </p>
+  </div>
+</footer>
+
+  </body>
+</html>

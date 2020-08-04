@@ -1,6 +1,6 @@
 theme = "harbor"
 baseurl = "https://yinminghao.top/"
-title = "Hugo Themes"
+title = "ymh的乱七八糟"
 paginate = 3
 languageCode = "en"
 DefaultContentLanguage = "en"
@@ -11,10 +11,10 @@ footnoteReturnLinkContents = "^"
 # If you use googleAnalytics, you set top-level options in config.toml to the beginning of the config file like other top-level options.
 googleAnalytics = "UA-XXXXXXXX-XX"
 # and disqus too.
-disqusShortName = "yourdisqusshortname"
+disqusShortName = "ymh"
 
 [Author]
-  name = "Hugo Author"
+  name = "ymh"
 
 [outputs]
   section = ["JSON", "HTML"]

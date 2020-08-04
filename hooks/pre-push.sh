@@ -1,5 +1,5 @@
 #!/bin/sh
 
-hugo -D
+hugo --theme=harbor --buildDrafts --baseUrl="https://yinminghao.top/"  
 
-hugo && rsync -avz --delete public/ root@47.93.118.219:/usr/local/nginx/ymh.blog
+rsync -avz --delete public/ root@47.93.118.219:/usr/local/nginx/ymh.blog

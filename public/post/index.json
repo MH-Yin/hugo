@@ -2,7 +2,7 @@
     
         
             {
-                "ref": "https://example.com/post/fabric%E4%BB%8B%E7%BB%8D%E4%B8%8E%E6%9E%B6%E6%9E%84%E5%88%86%E6%9E%90/",
+                "ref": "https://yinminghao.top/post/fabric%E4%BB%8B%E7%BB%8D%E4%B8%8E%E6%9E%B6%E6%9E%84%E5%88%86%E6%9E%90/",
                 "title": "Fabric介绍与架构分析",
                 "section": "post",
                 "date" : "2020.08.03",
@@ -12,7 +12,7 @@
     ,
         
             {
-                "ref": "https://example.com/post/%E7%A8%8B%E5%BA%8F%E5%91%98%E5%B7%A5%E4%BD%9C%E6%B3%95%E5%88%99/",
+                "ref": "https://yinminghao.top/post/%E7%A8%8B%E5%BA%8F%E5%91%98%E5%B7%A5%E4%BD%9C%E6%B3%95%E5%88%99/",
                 "title": "程序员工作法则",
                 "section": "post",
                 "date" : "2020.08.03",
@@ -22,7 +22,7 @@
     ,
         
             {
-                "ref": "https://example.com/post/fabric%E4%BA%A4%E6%98%93%E6%BA%90%E7%A0%81%E5%88%86%E6%9E%90/",
+                "ref": "https://yinminghao.top/post/fabric%E4%BA%A4%E6%98%93%E6%BA%90%E7%A0%81%E5%88%86%E6%9E%90/",
                 "title": "Fabric交易源码分析",
                 "section": "post",
                 "date" : "2020.08.03",
@@ -32,7 +32,7 @@
     ,
         
             {
-                "ref": "https://example.com/post/%E9%83%A8%E7%BD%B2hexo%E5%88%B0%E4%BA%91%E6%9C%8D%E5%8A%A1%E5%99%A8/",
+                "ref": "https://yinminghao.top/post/%E9%83%A8%E7%BD%B2hexo%E5%88%B0%E4%BA%91%E6%9C%8D%E5%8A%A1%E5%99%A8/",
                 "title": "部署hexo到云服务器",
                 "section": "post",
                 "date" : "2020.08.03",
@@ -42,7 +42,7 @@
     ,
         
             {
-                "ref": "https://example.com/post/fabric%E7%BD%91%E7%BB%9C%E6%BA%90%E7%A0%81%E5%88%86%E6%9E%90/",
+                "ref": "https://yinminghao.top/post/fabric%E7%BD%91%E7%BB%9C%E6%BA%90%E7%A0%81%E5%88%86%E6%9E%90/",
                 "title": "Fabric网络源码分析",
                 "section": "post",
                 "date" : "2020.08.03",

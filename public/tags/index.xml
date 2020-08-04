@@ -1,13 +1,13 @@
 <rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom">
 	<channel>
-		<title>Tags on Hugo Themes</title>
+		<title>Tags on ymh的乱七八糟</title>
 		<link>https://yinminghao.top/tags/</link>
 		<description>Recent content in Tags </description>
 		<generator>Hugo -- gohugo.io</generator>
 		
   		<language>en</language>
 		
-		<managingEditor>Page(/tags) (Hugo Author)</managingEditor>
+		<managingEditor>Page(/tags) (ymh)</managingEditor>
     	
   		<lastBuildDate>Mon, 03 Aug 2020 19:47:10 +0800</lastBuildDate>
 		

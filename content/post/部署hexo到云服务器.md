@@ -103,35 +103,35 @@ tags: [运维部署]
     ```
 - <span id="q3">nginx.conf</span>
     ```
-        user root;
-        worker_processes  1;
+user root;
+worker_processes  1;
 
-        error_log  /var/log/nginx/error.log warn;
-        pid        /var/run/nginx.pid;
-
-
-        events {
-            worker_connections  1024;
-        }
+error_log  /var/log/nginx/error.log warn;
+pid        /var/run/nginx.pid;
 
 
-        http {
-            include       /etc/nginx/mime.types;
-            default_type  application/octet-stream;
+events {
+    worker_connections  1024;
+}
 
-            log_format  main  '$remote_addr - $remote_user [$time_local] "$request" '
-                            '$status $body_bytes_sent "$http_referer" '
-                            '"$http_user_agent" "$http_x_forwarded_for"';
 
-            access_log  /var/log/nginx/access.log  main;
+http {
+    include       /etc/nginx/mime.types;
+    default_type  application/octet-stream;
 
-            sendfile        on;
-            #tcp_nopush     on;
+    log_format  main  '$remote_addr - $remote_user [$time_local] "$request" '
+                    '$status $body_bytes_sent "$http_referer" '
+                    '"$http_user_agent" "$http_x_forwarded_for"';
 
-            keepalive_timeout  65;
+    access_log  /var/log/nginx/access.log  main;
 
-            gzip  on;
+    sendfile        on;
+    #tcp_nopush     on;
 
-            include /etc/nginx/conf.d/*.conf;
-        }
+    keepalive_timeout  65;
+
+    gzip  on;
+
+    include /etc/nginx/conf.d/*.conf;
+}
     ```
